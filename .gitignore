@@ -1,0 +1,5 @@
+.venv
+tdsi_analyzer/__pycache__
+__pycache__
+calibrated_weights.json
+test_project
