@@ -1,5 +1,6 @@
 .venv
-tdsi_analyzer/__pycache__
 __pycache__
 calibrated_weights.json
+terraform_samples
+.env
 test_project

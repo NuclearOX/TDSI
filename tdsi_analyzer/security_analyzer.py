@@ -1,4 +1,4 @@
-# tdsi_analyzer/security_analyzer.py 
+# tdsi_analyzer/security_analyzer.py
 import subprocess
 import json
 import os
@@ -23,23 +23,24 @@ def load_calibrated_weights(weights_file="calibrated_weights.json") -> Dict[str,
         with open(weights_file, "r") as f:
             _weights_cache = json.load(f)
         
-        if "Max_SDS_Density_M" not in _weights_cache:
-            logging.fatal(f"Key 'Max_SDS_Density_M' missing. Re-run calibration.")
+        if "Max_SDS_Score" not in _weights_cache:
+            logging.error(f"Key 'Max_SDS_Score' missing. Re-run calibration.")
             return None
         
-        num_weights = len(_weights_cache) - 1 
-        logging.info(f"Weights loaded successfully ({num_weights} Rule IDs). Max Density Ratio M_D: {_weights_cache.get('Max_SDS_Density_M'):.6f}")
+        # Count actual rule weights (excluding metadata keys)
+        num_weights = sum(1 for k in _weights_cache.keys() if k not in ["calibration_date", "project_count", "unique_rules", "Max_SDS_Score"])
+        logging.info(f"Weights loaded successfully ({num_weights} Rule IDs). Max SDS Score: {_weights_cache.get('Max_SDS_Score'):.2f}")
         return _weights_cache
     except FileNotFoundError:
-        logging.fatal(f"Weights file ({weights_file}) not found. Execution halted.")
+        logging.error(f"Weights file ({weights_file}) not found. Execution halted.")
         return None
-    except json.JSONDecodeError:
-        logging.fatal(f"Error decoding JSON from {weights_file}. Check file integrity.")
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding JSON from {weights_file}: {str(e)}")
         return None
 
 
 def run_trivy_misconfiguration_scan(directory_path: str) -> Dict[str, Any] | None:
-    """Esegue la scansione Trivy CONFIG (Misconfigurazione IaC)."""
+    """Esegue la scansione Trivy CONFIG (Misconfigurazione IaC) - CORRECTED VERSION."""
     abs_path = os.path.abspath(directory_path)
     logging.info(f"--- Starting Trivy Misconfiguration (CONFIG) Scan on: {os.path.basename(abs_path)} ---")
     
@@ -51,50 +52,36 @@ def run_trivy_misconfiguration_scan(directory_path: str) -> Dict[str, Any] | Non
         "--format", "json",
         "--exit-code", "0",
         "--severity", "CRITICAL,HIGH,MEDIUM,LOW"
+        # NO INVALID FLAGS - Secrets detection is ENABLED BY DEFAULT in config scanning
     ]
     
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=300
+            command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=600
         )
-        if result.stdout.strip():
-            logging.info("Trivy Misconfig scan completed successfully.")
+        
+        # Log raw output for debugging if needed
+        if not result.stdout.strip():
+            logging.error("Trivy returned empty output")
+            return None
+            
+        try:
+            # First try to parse as JSON
+            json.loads(result.stdout)
+            logging.info("Trivy Misconfig scan completed successfully")
             return json.loads(result.stdout)
-        return None
+        except json.JSONDecodeError as e:
+            logging.error(f"Trivy output is not valid JSON: {str(e)}")
+            logging.debug(f"Trivy raw output: {result.stdout}")
+            return None
+            
     except Exception as e:
-        logging.fatal(f"Trivy Misconfig scan failed: {e}")
+        logging.error(f"Trivy Misconfig scan failed: {e}")
         return None
 
-
-def run_trivy_vulnerability_scan(directory_path: str) -> Dict[str, Any] | None:
-    """Esegue la scansione Trivy VULNERABILITY (Dipendenze/CVE)."""
-    abs_path = os.path.abspath(directory_path)
-    logging.info(f"--- Starting Trivy Vulnerability (FS) Scan on: {os.path.basename(abs_path)} ---")
-    
-    command = [
-        "docker", "run", "--rm",
-        "-v", f"{abs_path}:/scan",
-        "aquasec/trivy:latest",
-        "fs", "/scan",
-        "--format", "json",
-        "--exit-code", "0",
-        "--severity", "CRITICAL,HIGH,MEDIUM,LOW"
-    ]
-
-    try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=300
-        )
-        if result.stdout.strip():
-            logging.info("Trivy Vulnerability scan completed successfully.")
-            return json.loads(result.stdout)
-        return None
-    except Exception as e:
-        logging.fatal(f"Trivy Vulnerability scan failed: {e}")
-        return None
 
 def run_cloc_scan(directory_path: str) -> int:
-    """Conteggio nativo delle Lines of Code (LOC) per IaC - Senza dipendenze Docker"""
+    """Conteggio nativo delle Lines of Code (LOC) per IaC"""
     logging.info(f"--- Starting Native LOC Scan for Density ---")
     logging.info(f"Scanning directory: {directory_path}")
     
@@ -162,81 +149,69 @@ def calculate_sds(directory_path: str) -> float:
     if not weights:
         return -1
 
-    max_sds_density_m = weights.get("Max_SDS_Density_M", 0.05) 
+    max_sds_score = weights.get("Max_SDS_Score", 2000.0)
     
     # 1. Scansione del codice (Misconfigurazione)
     misconfig_data = run_trivy_misconfiguration_scan(directory_path)
-    # 2. Scansione delle dipendenze (Vulnerabilità)
-    vulnerability_data = run_trivy_vulnerability_scan(directory_path)
-    # 3. Scansione LOC (Densità D)
+    
+    # 2. Scansione LOC (Densità D)
     loc_density = run_cloc_scan(directory_path)
 
     if loc_density == 0:
         logging.warning("Code density (LOC) is zero. Cannot proceed with density normalization. Using default LOC=1 for ratio calculation.")
         loc_density = 1 
 
-    # --- CALCOLO RAW SCORE MISCONFIGURATION (CON PESI CALIBRATI) ---
-    misconfigs = []
+    # --- CALCOLO RAW SCORE ---
+    findings = []
+    secret_count = 0
+    
     if misconfig_data:
         for r in misconfig_data.get("Results", []):
+            # Process misconfigurations
             if "Misconfigurations" in r and r.get('Type') in ['terraform', 'cloudformation', 'kubernetes', 'ansible']: 
-                misconfigs.extend(r["Misconfigurations"])
-    
-    raw_score_misconfig = 0.0
-    
-    logging.info("\n--- DETAILED MISCONFIGURATION DEBT ---")
-    if misconfigs:
-        for idx, m in enumerate(misconfigs):
-            rule_id = m.get("ID")
-            weight = weights.get(rule_id, 0.0) 
-            raw_score_misconfig += weight
+                findings.extend(r["Misconfigurations"])
             
-            logging.info(f"[{idx+1}/{len(misconfigs)}] Rule: {rule_id} (Sev: {m.get('Severity')}) -> Weight: {weight:.2f}")
-    else:
-        logging.info("No misconfigurations found.")
-
-
-    # --- CALCOLO RAW SCORE VULNERABILITY (CON PESI CVSS NATIVI) ---
-    vulnerabilities = []
-    if vulnerability_data:
-        for r in vulnerability_data.get("Results", []):
-            if "Vulnerabilities" in r and r.get('Type') not in ['config']:
-                vulnerabilities.extend(r["Vulnerabilities"])
-
-    raw_score_vulnerability = 0.0
+            # Process secrets - THIS IS THE CORRECT WAY TO ACCESS THEM
+            if "Secrets" in r:
+                findings.extend(r["Secrets"])
+                secret_count += len(r["Secrets"])
     
-    logging.info("\n--- DETAILED VULNERABILITY DEBT (CVEs) ---")
-    if vulnerabilities:
-        for idx, v in enumerate(vulnerabilities):
-            cvss_score = v.get("Vulnerability", {}).get("CVSS", {}).get("V3Score", 0.0)
-            raw_score_vulnerability += cvss_score
+    raw_score = 0.0
+    
+    logging.info("\n--- DETAILED SECURITY DEBT ---")
+    if findings:
+        for idx, finding in enumerate(findings):
+            rule_id = finding.get("ID", "UNKNOWN")
+            # For secrets, the rule ID is in "RuleID" field
+            if "Secrets" in finding:
+                rule_id = finding.get("RuleID", "SECRET_UNKNOWN")
+                
+            weight = weights.get("weights", {}).get(rule_id, 0.0)
+            raw_score += weight
             
-            logging.info(f"[{idx+1}/{len(vulnerabilities)}] CVE: {v.get('VulnerabilityID')} (Sev: {v.get('Severity')}) -> Score: {cvss_score:.2f}")
+            # Determine if this is a secret finding
+            is_secret = "Secrets" in finding or any(x in rule_id for x in ["GEN", "AWS", "GHA", "GIT", "SECRET"])
+            
+            finding_type = "SECRET" if is_secret else "MISCONFIG"
+            logging.info(f"[{idx+1}/{len(findings)}] {finding_type}: {rule_id} (Sev: {finding.get('Severity')}) -> Weight: {weight:.2f}")
     else:
-        logging.info("No vulnerabilities found in dependencies.")
+        logging.info("No security findings found.")
 
+    # --- REPORT SECRET SPECIFIC METRICS IF FOUND ---
+    if secret_count > 0:
+        logging.warning(f"!!! CRITICAL: {secret_count} hardcoded secrets detected !!!")
+        # Only add the contextual warning if we have evidence from knowledge base
+        logging.info("!!! Note: According to GitGuardian, hardcoded secrets increased by 67% in 2022 !!!")
+        logging.info("!!! However, these will be properly weighted based on actual severity !!!")
 
-    # --- SOMMA TOTALE DEL DEBITO ---
-    raw_score_sum = raw_score_misconfig + raw_score_vulnerability
-    
-    logging.info("\n--- TOTAL DEBT SUMMARY ---")
-    logging.info(f"Total Misconfigurations Found: {len(misconfigs)}. Raw Score (Misconfig): {raw_score_misconfig:.2f}")
-    logging.info(f"Total Vulnerabilities Found: {len(vulnerabilities)}. Raw Score (Vulns): {raw_score_vulnerability:.2f}")
-
-    if raw_score_sum == 0.0:
-        return 0.0
-    
-    # --- FASE DI NORMALIZZAZIONE PER DENSITÀ ---
-    sds_density_ratio = raw_score_sum / loc_density
-    
+    # --- CALCOLO SDS NORMALE ---
     logging.info("\n--- NORMALIZATION COEFFICIENTS AND FINAL SCORE ---")
-    logging.info(f"Raw Score Sum (Total Debito Assoluto): {raw_score_sum:.2f}")
+    logging.info(f"Raw Score Sum (Total Security Debt): {raw_score:.2f}")
     logging.info(f"LOC Density (D - Righe di Codice IaC): {loc_density}")
-    logging.info(f"Raw Score / Density Ratio: {sds_density_ratio:.6f}")
-    logging.info(f"Normalization Factor (M_D - Max Ratio from Sample): {max_sds_density_m:.6f}")
+    logging.info(f"Normalization Factor (Max Score from Sample): {max_sds_score:.2f}")
     
     # Calcolo SDS
-    sds_normalized = (sds_density_ratio / max_sds_density_m) * 100.0
+    sds_normalized = (raw_score / max_sds_score) * 100.0
     final_sds = min(sds_normalized, 100.0) 
 
     logging.info(f"Calculated Normalized SDS (0-100): {final_sds:.2f}")
