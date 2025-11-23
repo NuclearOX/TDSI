@@ -1,159 +1,110 @@
-# run_analyzer.py
-
 import os
 import json
 import logging
-import sys
 import argparse
-from datetime import datetime 
-from typing import List
+import sys
+from tdsi_analyzer.security_analyzer import run_trivy_scan, calculate_sds, count_terraform_resources
 from calibrate import calibrate_weights_from_results
-from tdsi_analyzer.security_analyzer import run_trivy_misconfiguration_scan, calculate_sds
 
-# Configurazione logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='[%(asctime)s] [%(levelname)s] (RUNNER) %(message)s'
-)
+# Configure logging to stderr so it doesn't corrupt JSON output
+logger = logging.getLogger("Runner")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter('[%(asctime)s] [RUNNER] %(message)s'))
+    logger.addHandler(handler)
 
-WEIGHTS_FILE = "calibrated_weights.json"
+# Define Output Paths
+OUTPUT_DIR = "output"
+WEIGHTS_FILE = os.path.join(OUTPUT_DIR, "calibrated_weights.json")
 
-def perform_calibration(project_directories: List[str]):
-    """Esegue la calibrazione del modello SDS su più progetti."""
-    logging.info("\n--- PHASE 1: DATA GATHERING FOR CALIBRATION (MULTI-PROJECT) ---")
+def perform_calibration(project_directories):
+    logger.info("==========================================")
+    logger.info(f"   STARTING CALIBRATION: {len(project_directories)} PROJECTS")
+    logger.info("==========================================")
     
-    all_scan_data = []
-    
-    # 1. Scansione di tutti i progetti
-    for i, directory in enumerate(project_directories):
-        logging.info(f"[{i+1}/{len(project_directories)}] Scanning project: {os.path.basename(directory)}")
+    all_scans = []
+    project_resources = {}
+
+    # 1. Data Collection Loop
+    for i, path in enumerate(project_directories):
+        if not os.path.exists(path): 
+            logger.warning(f"Path not found: {path}")
+            continue
         
-        if not os.path.exists(directory):
-             logging.error(f"Directory not found: {directory}. Skipping.")
-             continue
-             
-        # La calibrazione usa solo la scansione delle misconfigurazioni
-        scan_data = run_trivy_misconfiguration_scan(directory)
-        if scan_data:
-            # Associazione robusta: Aggiunta del percorso di scansione al risultato
-            scan_data['project_path'] = directory 
-            all_scan_data.append(scan_data)
-            
-    
-    if not all_scan_data:
-        logging.error("Calibration Scan Failed: No valid scan data collected from any project.")
+        logger.info(f"[{i+1}/{len(project_directories)}] Scanning: {os.path.basename(path)}")
+        
+        # Trivy Scan
+        scan = run_trivy_scan(path)
+        if scan:
+            scan['project_path'] = path
+            all_scans.append(scan)
+        
+        # Resource Counting
+        res_count = count_terraform_resources(path)
+        project_resources[path] = res_count
+
+    if not all_scans:
+        logger.error("No valid scans collected. Calibration aborted.")
         return
 
-    logging.info(f"\nCollected misconfiguration data from {len(all_scan_data)}/{len(project_directories)} valid projects.")
-    logging.info("\n--- PHASE 2: MODEL CALIBRATION ---")
-    
-    # I percorsi sono in all_scan_data
-    weights = calibrate_weights_from_results(all_scan_data) 
-    
-    if not weights:
-        logging.fatal("Phase 2 Failed: Model calibration failed. Cannot save weights.")
-        return
+    # 2. Math & Logic
+    calib_data = calibrate_weights_from_results(all_scans, project_resources)
 
-    try:
-        # Update calibration date
-        weights["calibration_date"] = str(datetime.now())
+    # 3. Persistence
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+        logger.info(f"Created output directory: {OUTPUT_DIR}")
+    
+    with open(WEIGHTS_FILE, "w") as f:
+        json.dump(calib_data, f, indent=2)
         
-        with open(WEIGHTS_FILE, "w") as f:
-            json.dump(weights, f, indent=2)
-        logging.info(f"✅ SUCCESS: Calibrated weights saved to {WEIGHTS_FILE}.")
-        logging.info(f"    Max SDS Score: {weights.get('Max_SDS_Score', 0):.2f}")
-        logging.info(f"    Unique rules calibrated: {weights.get('unique_rules', 0)}")
-        
-        # Check for secret rules
-        secret_rules = [k for k, v in weights.get("weights", {}).items() 
-                       if any(x in k for x in ["GEN", "AWS", "GHA", "GIT", "SECRET"])]
-        if secret_rules:
-            logging.info(f"    Hardcoded secret rules detected: {len(secret_rules)}")
-            logging.info("    These are weighted at 8.5+ as they were exploited in 2022 breaches per GitGuardian report")
-        else:
-            logging.warning("    WARNING: No hardcoded secret rules detected in calibration!")
-            logging.warning("    This suggests secrets scanning may not be working properly")
-            
-    except Exception as e:
-        logging.fatal(f"Failed to save weights file: {e}")
-        return
+    logger.info("==========================================")
+    logger.info(f"Calibration Complete.")
+    logger.info(f"Weights saved to: {WEIGHTS_FILE}")
+    logger.info("==========================================")
 
-def perform_scoring(directory: str):
-    """Esegue lo scoring SDS sul singolo progetto specificato."""
+def perform_scoring(directory):
+    logger.info(f"--- Initiating Scoring Mode for: {directory} ---")
+    
     if not os.path.exists(WEIGHTS_FILE):
-        logging.fatal(f"Scoring Failed: Weights file ({WEIGHTS_FILE}) not found. Run calibration first!")
-        return
+        logger.error(f"Weights file not found at {WEIGHTS_FILE}.")
+        logger.error("Please run with --calibrate first to generate the baseline.")
+        sys.exit(1)
         
-    logging.info("\n--- PHASE 3: FINAL SCORING ---")
     sds = calculate_sds(directory)
     
-    logging.info("==============================================")
-    if sds >= 0:
-        logging.info(f"✅ FINAL SDS SCORE for {os.path.basename(directory)}: {sds:.2f}/100")
-        
-        # Add security context based on knowledge base
-        if sds > 70:
-            logging.warning("⚠️  HIGH SECURITY DEBT: Score above 70 indicates significant risk")
-            logging.warning("⚠️  According to GitGuardian, 2022 saw 67% increase in hardcoded secrets")
-            logging.warning("⚠️  These have been exploited in attacks against Uber, CircleCI, Microsoft, etc.")
-        
-        logging.info("SUCCESS: The TDSI-Analyzer SDS component is functional and normalized.")
-    else:
-        logging.error("❌ FAILURE: SDS calculation returned an error. Check previous logs.")
-    logging.info("==============================================")
-
+    # FINAL OUTPUT: JSON to Stdout
+    result = {
+        "project": directory,
+        "sds": sds,
+        "timestamp": str(os.times())
+    }
+    # This print statement is the ONLY output to stdout
+    print(json.dumps(result))
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="TDSI-Analyzer SDS Runner: Calibrate weights on multiple projects or score a single project."
-    )
-    parser.add_argument(
-        "projects", 
-        type=str, 
-        nargs='+', 
-        help="One or more IaC project directories to analyze/calibrate."
-    )
-    parser.add_argument(
-        "--calibrate", 
-        action="store_true", 
-        help="Run the model calibration process (requires multiple project directories). Must be run first on a representative dataset."
-    )
-    parser.add_argument(
-        "--scan-subdirs",
-        action="store_true",
-        help="When provided with a directory path, scan all its immediate subdirectories as projects"
-    )
+    parser = argparse.ArgumentParser(description="TDSI Security Debt Analyzer")
+    parser.add_argument("projects", nargs="+", help="List of project directories to process")
+    parser.add_argument("--calibrate", action="store_true", help="Run in calibration mode")
+    parser.add_argument("--scan-subdirs", action="store_true", help="Treat subdirectories of the input path as separate projects")
     
     args = parser.parse_args()
-    
-    # Process --scan-subdirs option
-    project_directories = []
-    for path in args.projects:
-        if os.path.isdir(path) and args.scan_subdirs:
-            # Get immediate subdirectories (not recursive)
-            for item in os.listdir(path):
-                item_path = os.path.join(path, item)
-                if os.path.isdir(item_path):
-                    project_directories.append(item_path)
-            logging.info(f"Expanded {path} to {len(project_directories)} subdirectories")
-        else:
-            project_directories.append(path)
 
-    # --- INIZIO ESECUZIONE ---
-    logging.info("==============================================")
-    logging.info("== TDSI-ANALYZER: SDS EXECUTION RUNNER ==")
-    logging.info("==============================================")
+    targets = []
+    for p in args.projects:
+        if args.scan_subdirs and os.path.isdir(p):
+            # Only include directories
+            subdirs = [os.path.join(p, d) for d in os.listdir(p) if os.path.isdir(os.path.join(p, d))]
+            targets.extend(subdirs)
+        else:
+            targets.append(p)
+
+    if not targets:
+        logger.error("No valid target directories found.")
+        sys.exit(1)
 
     if args.calibrate:
-        logging.info("MODE: CALIBRATION (Multiple Projects)")
-        if len(project_directories) < 20:
-             logging.warning("WARNING: Recommended minimum 20 projects for statistically valid calibration.")
-             logging.warning(f"        You are using only {len(project_directories)} projects.")
-        perform_calibration(project_directories)
+        perform_calibration(targets)
     else:
-        if len(project_directories) != 1:
-            logging.fatal("Scoring Failed: Must specify exactly one project directory when not using --calibrate.")
-            sys.exit(1)
-            
-        logging.info("MODE: SCORING (Requires calibrated_weights.json)")
-        perform_scoring(project_directories[0])
+        perform_scoring(targets[0])

@@ -1,220 +1,194 @@
-# tdsi_analyzer/security_analyzer.py
 import subprocess
 import json
 import os
+import re
 import logging
+import sys
+import time
 from typing import Dict, Any
 
-# Configurazione logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] (SDS) %(message)s'
-)
+# --- LOGGING CONFIGURATION ---
+# We use a specific logger name to avoid conflicts.
+# We output to STDERR so that the final JSON output (STDOUT) remains pure for piping.
+logger = logging.getLogger("SDS_Analyzer")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stderr)
+    # Detailed format: Time | Component | Message
+    handler.setFormatter(logging.Formatter('[%(asctime)s] [SDS_Analyzer] %(message)s'))
+    logger.addHandler(handler)
 
 _weights_cache = None
 
-def load_calibrated_weights(weights_file="calibrated_weights.json") -> Dict[str, float] | None:
+def load_calibrated_weights(weights_file="output/calibrated_weights.json") -> Dict[str, Any] | None:
+    """
+    Loads the calibration data (Weights and Max Density Threshold).
+    Implements caching to prevent re-reading the file on every call.
+    """
     global _weights_cache
-    if _weights_cache:
-        logging.debug("Returning cached weights.")
+    if _weights_cache: 
         return _weights_cache
-
+    
+    logger.info(f"Attempting to load weights from: {weights_file}")
     try:
         with open(weights_file, "r") as f:
             _weights_cache = json.load(f)
         
-        if "Max_SDS_Score" not in _weights_cache:
-            logging.error(f"Key 'Max_SDS_Score' missing. Re-run calibration.")
-            return None
-        
-        # Count actual rule weights (excluding metadata keys)
-        num_weights = sum(1 for k in _weights_cache.keys() if k not in ["calibration_date", "project_count", "unique_rules", "Max_SDS_Score"])
-        logging.info(f"Weights loaded successfully ({num_weights} Rule IDs). Max SDS Score: {_weights_cache.get('Max_SDS_Score'):.2f}")
+        # Log summary of what was loaded
+        rule_count = len(_weights_cache.get("weights", {}))
+        max_density = _weights_cache.get("Max_SDS_Density", "UNKNOWN")
+        logger.info(f"Weights loaded successfully. Rules: {rule_count} | Max Density Threshold: {max_density}")
         return _weights_cache
     except FileNotFoundError:
-        logging.error(f"Weights file ({weights_file}) not found. Execution halted.")
+        logger.error(f"CRITICAL: Weights file not found at {weights_file}. SDS will likely fail or use defaults.")
         return None
-    except json.JSONDecodeError as e:
-        logging.error(f"Error decoding JSON from {weights_file}: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error loading weights: {e}")
         return None
 
-
-def run_trivy_misconfiguration_scan(directory_path: str) -> Dict[str, Any] | None:
-    """Esegue la scansione Trivy CONFIG (Misconfigurazione IaC) - CORRECTED VERSION."""
+def run_trivy_scan(directory_path: str) -> Dict[str, Any] | None:
+    """
+    Executes the Trivy binary directly on the filesystem.
+    """
     abs_path = os.path.abspath(directory_path)
-    logging.info(f"--- Starting Trivy Misconfiguration (CONFIG) Scan on: {os.path.basename(abs_path)} ---")
+    logger.info(f"--- Step 1: Executing Trivy Scan ---")
+    logger.info(f"Target: {abs_path}")
     
-    command = [
-        "docker", "run", "--rm",
-        "-v", f"{abs_path}:/scan",
-        "aquasec/trivy:latest",
-        "config", "/scan",
+    cmd = [
+        "trivy", "fs",
+        "--scanners", "config,secret",
         "--format", "json",
-        "--exit-code", "0",
-        "--severity", "CRITICAL,HIGH,MEDIUM,LOW"
-        # NO INVALID FLAGS - Secrets detection is ENABLED BY DEFAULT in config scanning
+        "--severity", "CRITICAL,HIGH,MEDIUM,LOW",
+        abs_path
     ]
     
+    start_time = time.time()
     try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=600
-        )
+        # Run the command
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        elapsed = time.time() - start_time
         
-        # Log raw output for debugging if needed
+        if result.returncode != 0:
+            logger.warning(f"Trivy finished with non-zero exit code: {result.returncode}")
+        
         if not result.stdout.strip():
-            logging.error("Trivy returned empty output")
+            logger.warning(f"Trivy returned empty output. (Duration: {elapsed:.2f}s)")
             return None
             
-        try:
-            # First try to parse as JSON
-            json.loads(result.stdout)
-            logging.info("Trivy Misconfig scan completed successfully")
-            return json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            logging.error(f"Trivy output is not valid JSON: {str(e)}")
-            logging.debug(f"Trivy raw output: {result.stdout}")
-            return None
-            
-    except Exception as e:
-        logging.error(f"Trivy Misconfig scan failed: {e}")
+        data = json.loads(result.stdout)
+        logger.info(f"Trivy scan completed in {elapsed:.2f}s. Parsing results...")
+        return data
+        
+    except FileNotFoundError:
+        logger.critical("Trivy binary not found! Is it installed in the environment?")
+        return None
+    except json.JSONDecodeError:
+        logger.error("Trivy produced invalid JSON output. Check raw logs if debugging.")
         return None
 
-
-def run_cloc_scan(directory_path: str) -> int:
-    """Conteggio nativo delle Lines of Code (LOC) per IaC"""
-    logging.info(f"--- Starting Native LOC Scan for Density ---")
-    logging.info(f"Scanning directory: {directory_path}")
-    
-    # Estensioni IaC rilevanti
-    valid_extensions = {".tf", ".hcl", ".yaml", ".yml", ".json", ".py", ".go", ".sh", ".ps1"}
-    total_lines = 0
+def count_terraform_resources(directory_path: str) -> int:
+    """
+    Parses .tf files to count logical infrastructure resources.
+    This is the Denominator for the Density Calculation.
+    """
+    logger.info(f"--- Step 2: Measuring Infrastructure Size (Resource Counting) ---")
+    resource_count = 0
     file_count = 0
     
-    try:
-        # Scansione ricorsiva della directory
-        for root, _, files in os.walk(directory_path):
-            for file in files:
-                _, ext = os.path.splitext(file)
-                if ext.lower() in valid_extensions:
-                    file_count += 1
-                    file_path = os.path.join(root, file)
-                    
-                    try:
-                        # Tentativo con diverse codifiche
-                        encodings = ['utf-8', 'latin-1', 'cp1252']
-                        content = None
-                        
-                        for encoding in encodings:
-                            try:
-                                with open(file_path, 'r', encoding=encoding) as f:
-                                    content = f.readlines()
-                                break
-                            except UnicodeDecodeError:
-                                continue
-                        
-                        if content is None:
-                            logging.debug(f"Skipped {file} - unsupported encoding")
-                            continue
-                            
-                        # Filtra righe di codice (non commenti, non vuote)
-                        for line in content:
-                            stripped = line.strip()
-                            # Ignora commenti e righe vuote
-                            if not stripped or stripped.startswith('#') or \
-                               stripped.startswith('//') or stripped.startswith('/*') or \
-                               stripped.startswith('<!--') or stripped.startswith('\"\"\"'):
-                                continue
-                            total_lines += 1
-                            
-                    except Exception as e:
-                        logging.debug(f"Error processing {file_path}: {str(e)}")
-                        continue
-        
-        if file_count > 0:
-            logging.info(f"Native scan completed successfully. Scanned {file_count} files. Total IaC LOC found: {total_lines}")
-        else:
-            logging.warning("No relevant IaC files found in directory.")
-            return 0
-            
-        return total_lines
-        
-    except Exception as e:
-        logging.error(f"Native LOC scan failed: {str(e)}")
-        return 0
+    # Regex to find 'resource "type" "name" {' OR 'module "name" {'
+    resource_pattern = re.compile(r'^\s*(resource|module)\s+"[^"]+"', re.MULTILINE)
 
+    for root, _, files in os.walk(directory_path):
+        for file in files:
+            if file.endswith(".tf"):
+                file_count += 1
+                try:
+                    file_path = os.path.join(root, file)
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                        matches = resource_pattern.findall(content)
+                        count_in_file = len(matches)
+                        resource_count += count_in_file
+                        # Only log verbose details for files that actually have resources
+                        if count_in_file > 0:
+                            logger.debug(f"   -> {file}: Found {count_in_file} resources")
+                except Exception as e:
+                    logger.warning(f"Could not read file {file}: {e}")
+                    continue
+    
+    logger.info(f"Scanned {file_count} Terraform files. Total Logical Resources: {resource_count}")
+    return resource_count
 
 def calculate_sds(directory_path: str) -> float:
-    logging.info("--- Starting Weighted SDS Calculation ---")
-    weights = load_calibrated_weights()
-    if not weights:
-        return -1
-
-    max_sds_score = weights.get("Max_SDS_Score", 2000.0)
+    """
+    Calculates the Security Debt Score (SDS).
+    """
+    logger.info(f"STARTING SDS CALCULATION FOR: {os.path.basename(directory_path)}")
     
-    # 1. Scansione del codice (Misconfigurazione)
-    misconfig_data = run_trivy_misconfiguration_scan(directory_path)
-    
-    # 2. Scansione LOC (Densità D)
-    loc_density = run_cloc_scan(directory_path)
+    # Load Weights
+    weights_data = load_calibrated_weights()
+    if not weights_data:
+        logger.error("Aborting calculation: Weights missing.")
+        return -1.0
 
-    if loc_density == 0:
-        logging.warning("Code density (LOC) is zero. Cannot proceed with density normalization. Using default LOC=1 for ratio calculation.")
-        loc_density = 1 
+    max_density_threshold = weights_data.get("Max_SDS_Density", 5.0)
+    weights_map = weights_data.get("weights", {})
 
-    # --- CALCOLO RAW SCORE ---
-    findings = []
-    secret_count = 0
+    # 1. Scan
+    scan_data = run_trivy_scan(directory_path)
     
-    if misconfig_data:
-        for r in misconfig_data.get("Results", []):
-            # Process misconfigurations
-            if "Misconfigurations" in r and r.get('Type') in ['terraform', 'cloudformation', 'kubernetes', 'ansible']: 
-                findings.extend(r["Misconfigurations"])
+    # 2. Count Resources
+    resource_count = count_terraform_resources(directory_path)
+    if resource_count == 0:
+        logger.warning(f"No Terraform resources found. SDS force-set to 0.0")
+        return 0.0
+
+    # 3. Aggregate Risk
+    logger.info(f"--- Step 3: Aggregating Risk & Applying Weights ---")
+    total_risk_score = 0.0
+    stats = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    finding_count = 0
+    
+    if scan_data and "Results" in scan_data:
+        for result in scan_data["Results"]:
+            # Combine Misconfigurations + Secrets
+            all_findings = result.get("Misconfigurations", []) + result.get("Secrets", [])
             
-            # Process secrets - THIS IS THE CORRECT WAY TO ACCESS THEM
-            if "Secrets" in r:
-                findings.extend(r["Secrets"])
-                secret_count += len(r["Secrets"])
-    
-    raw_score = 0.0
-    
-    logging.info("\n--- DETAILED SECURITY DEBT ---")
-    if findings:
-        for idx, finding in enumerate(findings):
-            rule_id = finding.get("ID", "UNKNOWN")
-            # For secrets, the rule ID is in "RuleID" field
-            if "Secrets" in finding:
-                rule_id = finding.get("RuleID", "SECRET_UNKNOWN")
+            for finding in all_findings:
+                finding_count += 1
+                rule_id = finding.get("ID", finding.get("RuleID", "UNKNOWN"))
+                severity = finding.get("Severity", "LOW")
                 
-            weight = weights.get("weights", {}).get(rule_id, 0.0)
-            raw_score += weight
-            
-            # Determine if this is a secret finding
-            is_secret = "Secrets" in finding or any(x in rule_id for x in ["GEN", "AWS", "GHA", "GIT", "SECRET"])
-            
-            finding_type = "SECRET" if is_secret else "MISCONFIG"
-            logging.info(f"[{idx+1}/{len(findings)}] {finding_type}: {rule_id} (Sev: {finding.get('Severity')}) -> Weight: {weight:.2f}")
-    else:
-        logging.info("No security findings found.")
+                if severity in stats: stats[severity] += 1
+                
+                # Weight Determination Logic
+                if rule_id in weights_map:
+                    weight = weights_map[rule_id]
+                    # logger.debug(f"   Rule {rule_id} ({severity}) -> Calibrated Weight: {weight}")
+                else:
+                    # Fallback
+                    weight = {"CRITICAL": 9.0, "HIGH": 7.0, "MEDIUM": 4.0, "LOW": 1.0}.get(severity, 1.0)
+                    logger.warning(f"   Rule {rule_id} not in calibration. Using Fallback Weight: {weight}")
+                
+                total_risk_score += weight
 
-    # --- REPORT SECRET SPECIFIC METRICS IF FOUND ---
-    if secret_count > 0:
-        logging.warning(f"!!! CRITICAL: {secret_count} hardcoded secrets detected !!!")
-        # Only add the contextual warning if we have evidence from knowledge base
-        logging.info("!!! Note: According to GitGuardian, hardcoded secrets increased by 67% in 2022 !!!")
-        logging.info("!!! However, these will be properly weighted based on actual severity !!!")
-
-    # --- CALCOLO SDS NORMALE ---
-    logging.info("\n--- NORMALIZATION COEFFICIENTS AND FINAL SCORE ---")
-    logging.info(f"Raw Score Sum (Total Security Debt): {raw_score:.2f}")
-    logging.info(f"LOC Density (D - Righe di Codice IaC): {loc_density}")
-    logging.info(f"Normalization Factor (Max Score from Sample): {max_sds_score:.2f}")
+    # 4. Calculate Final Score
+    logger.info(f"--- Step 4: Normalization & Scoring ---")
+    logger.info(f"   Total Findings: {finding_count}")
+    logger.info(f"   Severity Breakdown: {stats}")
+    logger.info(f"   Total Weighted Risk (Numerator): {total_risk_score:.2f}")
+    logger.info(f"   Total Resources (Denominator):   {resource_count}")
     
-    # Calcolo SDS
-    sds_normalized = (raw_score / max_sds_score) * 100.0
-    final_sds = min(sds_normalized, 100.0) 
-
-    logging.info(f"Calculated Normalized SDS (0-100): {final_sds:.2f}")
-    logging.info("--- SDS Calculation Finished ---")
+    # Density Calculation
+    sds_density = total_risk_score / resource_count
+    logger.info(f"   Calculated Risk Density: {sds_density:.4f} points/resource")
+    logger.info(f"   Max Density Threshold:   {max_density_threshold:.4f}")
     
-    return round(final_sds, 2)
+    # Final Normalization
+    final_sds = (sds_density / max_density_threshold) * 100.0
+    capped_sds = min(final_sds, 100.0)
+    
+    logger.info(f"   Raw Percentage: {final_sds:.2f}%")
+    logger.info(f"✅ FINAL SDS SCORE: {capped_sds:.2f}")
+
+    return round(capped_sds, 2)

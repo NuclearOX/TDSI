@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.DS_Store
+.vscode
+terraform_samples
+output
+calibrated_weights.json
+.env
