@@ -10,7 +10,7 @@ SEVERITY_WEIGHTS = {
     'warning': 5,
     'notice': 2
 }
-DEFAULT_WEIGHT = 2
+DEFAULT_WEIGHT = 1
 
 def run_tflint_analysis(path_to_scan):
     """Esegue TFLint con la sintassi --chdir corretta."""
