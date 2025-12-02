@@ -27,7 +27,7 @@ git clone <https://github.com/NuclearOX/TDSI.git>
 codeBash
 
 ```
-cd tdsi_terraform_calculator/terraform_projects
+cd TDSI/qds_docker_container
 ```
 
 **3. Costruisci l'Immagine Docker**  
