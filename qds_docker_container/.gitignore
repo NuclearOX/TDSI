@@ -1,0 +1,13 @@
+# Eseguibile di Windows, non necessario nel repository
+tflint.exe
+
+# Cache e file compilati di Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ambienti virtuali
+.venv
+venv/
+env/
