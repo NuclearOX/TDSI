@@ -1,6 +1,6 @@
 import logging
 import sys
-import os
+import numpy as np # Se non hai numpy, possiamo usare statistics o logica base, qui uso logica base per non aggiungere dipendenze
 from typing import Dict, Any, List
 from datetime import datetime
 
@@ -9,7 +9,7 @@ logger = logging.getLogger("Calibration")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter('[%(asctime)s] [CALIBRATION] %(message)s'))
+    handler.setFormatter(logging.Formatter('[%(asctime)s] [CALIB] %(message)s', datefmt='%H:%M:%S'))
     logger.addHandler(handler)
 
 CVSS_BOUNDS = {
@@ -19,19 +19,39 @@ CVSS_BOUNDS = {
     "LOW": (0.1, 3.9)
 }
 
-def calibrate_weights_from_results(scan_results: List[Dict[str, Any]], project_resource_counts: Dict[str, int]) -> Dict[str, Any]:
+# Fallback weights for calibration calculation
+FALLBACK_WEIGHTS = {"CRITICAL": 9.5, "HIGH": 8.0, "MEDIUM": 5.0, "LOW": 2.0}
+
+def get_percentile(data: List[float], percentile: float) -> float:
+    """Calculates percentile safely without heavy dependencies."""
+    if not data: return 5.0 # Safety default
+    data.sort()
+    k = (len(data) - 1) * percentile
+    f = int(np.floor(k)) if 'numpy' in sys.modules else int(k) # Simple floor if numpy missing
+    c = int(np.ceil(k)) if 'numpy' in sys.modules else int(k) + 1
+    if f == c: return data[int(k)]
+    return data[f] * (c - k) + data[c] * (k - f)
+
+def calibrate_metrics(calibration_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Performs the Hybrid Weight Calibration and Normalization logic.
+    Performs Hybrid Calibration for BOTH Security (SDS) and Quality (QDS).
+    Input `calibration_data` contains:
+      - 'sds_scan': The JSON from Trivy
+      - 'qds_raw': The raw float score from QDS
+      - 'resources': Integer count of resources
     """
-    logger.info("--- Starting Weight Calibration Logic ---")
+    logger.info("--- Starting TDSI Hybrid Calibration ---")
     
+    # --- PART 1: SDS Weights (Frequency Analysis) ---
+    logger.info("Step 1/3: Calibrating Security Weights based on Prevalence...")
     rule_counts = {}
     severity_map = {}
     
-    # --- STEP 1: Frequency Counting ---
-    logger.info("Step 1: Analyzing vulnerability prevalence across dataset...")
-    for scan in scan_results:
-        if "Results" not in scan: continue
+    total_issues = 0
+    for entry in calibration_data:
+        scan = entry.get('sds_scan')
+        if not scan or "Results" not in scan: continue
+        
         for res in scan["Results"]:
             findings = res.get("Misconfigurations", []) + res.get("Secrets", [])
             for f in findings:
@@ -40,85 +60,75 @@ def calibrate_weights_from_results(scan_results: List[Dict[str, Any]], project_r
                 if rule_id:
                     rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
                     severity_map[rule_id] = sev
+                    total_issues += 1
 
-    total_issues = sum(rule_counts.values())
-    unique_rules = len(rule_counts)
-    logger.info(f"Dataset Statistics: {total_issues} total issues found across {unique_rules} unique rules.")
-    
-    if total_issues == 0:
-        logger.error("No issues found. Calibration cannot proceed.")
-        return {}
-
-    # Log Top 5 most common issues (Insight into the dataset)
-    sorted_rules = sorted(rule_counts.items(), key=lambda x: x[1], reverse=True)
-    logger.info("Top 5 Most Frequent Vulnerabilities (Lower weight applied due to high frequency):")
-    for i, (rid, count) in enumerate(sorted_rules[:5]):
-        pct = (count / total_issues) * 100
-        logger.info(f"   {i+1}. {rid} ({severity_map[rid]}): {count} occurrences ({pct:.1f}%)")
-
-    # --- STEP 2: Weight Calculation ---
-    logger.info("Step 2: Calculating Dynamic Weights (Hybrid Approach)...")
     final_weights = {}
-    
-    for rule_id, count in rule_counts.items():
-        sev = severity_map.get(rule_id, "LOW")
-        prevalence_pct = count / total_issues
-        
-        # Rarity Modifier: Rare issues = Higher Impact
-        rarity_modifier = 1.0 - prevalence_pct 
-        
-        # Base Score from CVSS Max
-        base_score = CVSS_BOUNDS.get(sev, (1.0, 1.0))[1]
-        
-        # Formula: Weight = Base * (0.8 + (Rarity * 0.2))
-        weight = base_score * (0.8 + (rarity_modifier * 0.2))
-        final_weights[rule_id] = round(weight, 2)
+    if total_issues > 0:
+        for rule_id, count in rule_counts.items():
+            sev = severity_map.get(rule_id, "LOW")
+            prevalence_pct = count / total_issues
+            # Rarity Modifier: Rare issues = Higher Impact
+            rarity_modifier = 1.0 - prevalence_pct 
+            base_score = CVSS_BOUNDS.get(sev, (1.0, 1.0))[1]
+            # Formula: Weight = Base * (0.8 + (Rarity * 0.2))
+            weight = base_score * (0.8 + (rarity_modifier * 0.2))
+            final_weights[rule_id] = round(weight, 2)
+        logger.info(f"   Generated weights for {len(final_weights)} rules.")
+    else:
+        logger.warning("   No security issues found in dataset. Weights skipped.")
 
-    logger.info(f"Generated weights for {len(final_weights)} rules.")
-
-    # --- STEP 3: Max Density Determination ---
-    logger.info("Step 3: Determining Max Density Threshold (95th Percentile)...")
-    project_densities = []
+    # --- PART 2: SDS Density Threshold ---
+    logger.info("Step 2/3: Determining Max SDS Density (95th Percentile)...")
+    sds_densities = []
     
-    for scan in scan_results:
-        path = scan.get('project_path')
-        res_count = project_resource_counts.get(path, 0)
-        
+    for entry in calibration_data:
+        res_count = entry.get('resources', 0)
         if res_count == 0: continue
         
-        # Re-calculate risk using new weights
+        # Calculate Risk Score using NEW weights
+        scan = entry.get('sds_scan')
         total_risk = 0.0
-        if "Results" in scan:
+        if scan and "Results" in scan:
             for res in scan["Results"]:
                 findings = res.get("Misconfigurations", []) + res.get("Secrets", [])
                 for f in findings:
                     rid = f.get("ID", f.get("RuleID"))
-                    total_risk += final_weights.get(rid, 0.0)
+                    sev = f.get("Severity", "LOW").upper()
+                    # Use calibrated weight or fallback
+                    w = final_weights.get(rid, FALLBACK_WEIGHTS.get(sev, 1.0))
+                    total_risk += w
         
         density = total_risk / res_count
-        project_densities.append(density)
+        sds_densities.append(density)
 
-    # Statistical Thresholding
-    project_densities.sort()
-    logger.info(f"Observed Project Densities (Sorted): {[round(d, 2) for d in project_densities]}")
+    max_sds_density = get_percentile(sds_densities, 0.95) if sds_densities else 5.0
+    # Safety Floor
+    max_sds_density = max(max_sds_density, 5.0)
+    logger.info(f"   SDS Densities: {[round(d,1) for d in sds_densities]}")
+    logger.info(f"   ✅ Max SDS Density Threshold: {max_sds_density:.2f}")
+
+    # --- PART 3: QDS Density Threshold ---
+    logger.info("Step 3/3: Determining Max QDS Density (95th Percentile)...")
+    qds_densities = []
     
-    if project_densities:
-        idx = int(len(project_densities) * 0.95)
-        calculated_max = project_densities[idx]
-        logger.info(f"95th Percentile Value: {calculated_max:.2f}")
+    for entry in calibration_data:
+        res_count = entry.get('resources', 0)
+        qds_raw = entry.get('qds_raw', 0.0)
         
-        # Safety Floor
-        max_density = max(calculated_max, 5.0)
-        if max_density == 5.0 and calculated_max < 5.0:
-            logger.info("Applied Safety Floor: Threshold raised to 5.0 to prevent score inflation.")
-    else:
-        max_density = 5.0
-        logger.warning("No valid project densities found. Defaulting to 5.0.")
-
-    logger.info(f"✅ Final Max Density Threshold: {max_density:.2f}")
+        if res_count > 0:
+            density = qds_raw / res_count
+            qds_densities.append(density)
+            
+    max_qds_density = get_percentile(qds_densities, 0.95) if qds_densities else 20.0
+    # Safety Floor (Minimum 10 points per resource implies significant debt)
+    max_qds_density = max(max_qds_density, 10.0)
+    
+    logger.info(f"   QDS Densities: {[round(d,1) for d in qds_densities]}")
+    logger.info(f"   ✅ Max QDS Density Threshold: {max_qds_density:.2f}")
 
     return {
         "calibration_date": str(datetime.now()),
-        "Max_SDS_Density": round(max_density, 2),
+        "Max_SDS_Density": round(max_sds_density, 2),
+        "Max_QDS_Density": round(max_qds_density, 2),
         "weights": final_weights
     }

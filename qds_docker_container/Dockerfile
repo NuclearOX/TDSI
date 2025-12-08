@@ -1,7 +1,7 @@
 # --- STAGE 1: Builder ---
 # Utilizziamo un'immagine minima (Alpine Linux) solo per scaricare tflint.
 # Questo approccio, chiamato "multi-stage build", rende l'immagine finale più piccola e pulita.
-FROM alpine:latest as builder
+FROM alpine:latest AS builder
 
 # Installiamo i pacchetti necessari per scaricare (wget) e scompattare (unzip)
 RUN apk --no-cache add wget unzip
