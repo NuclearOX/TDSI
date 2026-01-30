@@ -1,4 +1,16 @@
+# Ignora i dati (sono troppo grandi o sensibili)
+data/output/*
+!data/output/.gitkeep
+data/input/*
+!data/input/.gitkeep
+others/
 .venv
-__pycache__
-terraform_samples
-.env
+.github
+*.pdf
+
+# Ignora file temporanei Python
+__pycache__/
+*.pyc
+
+# Ignora file di sistema
+.DS_Store

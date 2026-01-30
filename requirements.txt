@@ -1,3 +1,19 @@
-python-dotenv==1.0.1
-requests==2.31.0
-numpy==1.26.0
+# Mining e Parsing
+pydriller==2.6
+python-hcl2==4.3.2
+
+# Gestione Dati e Database
+pandas==2.2.0
+numpy==1.26.3
+
+# Statistica e Machine Learning
+scipy==1.11.4
+scikit-learn==1.4.0
+pymannkendall==1.4.3  # Essenziale per il test di Mann-Kendall (RQ3)
+
+# Grafici
+matplotlib==3.8.2
+seaborn==0.13.2
+
+# Utilità
+tqdm==4.66.1          # Barre di caricamento (fondamentale quando analizzi tanti commit)

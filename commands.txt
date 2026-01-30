@@ -1,0 +1,11 @@
+docker build -t terra-miner .
+
+docker run --rm -v ${PWD}:/app terra-miner
+
+docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/inspect_db.py
+
+docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/mining/terrads_loader.py
+
+docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/metrics/quality_model.py
+
+docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/metrics/security_model.py

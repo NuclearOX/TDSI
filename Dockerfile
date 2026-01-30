@@ -1,40 +1,46 @@
-# Dockerfile
-
-# Stage 1: Get TFLint binary
-FROM alpine:latest AS builder
-RUN apk --no-cache add wget unzip
-WORKDIR /tmp
-# Download TFLint (Linux AMD64)
-# Note: Check latest version if needed, v0.50.3 is stable
-RUN wget https://github.com/terraform-linters/tflint/releases/download/v0.50.3/tflint_linux_amd64.zip && \
-    unzip tflint_linux_amd64.zip
-
-# Stage 2: Final Image
+# Usa un'immagine base leggera di Python
 FROM python:3.11-slim
 
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y curl git && \
-    rm -rf /var/lib/apt/lists/*
+# Metadati
+LABEL description="Replication Package for Terraform Quality & Security Evolution"
 
-# Install Trivy
+# Variabili d'ambiente per Python
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# 1. Installazione dipendenze di sistema
+# git: necessario per PyDriller
+# curl: necessario per scaricare Trivy
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Installazione di Trivy (Security Scanner)
+# Scarica ed esegue lo script ufficiale di installazione
 RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-# Install TFLint
-COPY --from=builder /tmp/tflint /usr/local/bin/
+# Questo crea la cache in /root/.cache/trivy
+RUN trivy image --download-db-only
 
-# --- NEW: Install TFLint Config & Plugins ---
-# 1. Copy the default config to the app directory
-COPY .tflint.hcl /root/.tflint.hcl
-
-# 2. Run init to download the 'recommended' plugin into the container layer
-# This prevents TFLint from trying to download it at runtime (which is slow/flaky)
-RUN tflint --init --config /root/.tflint.hcl
-
+# 3. Setup dell'ambiente di lavoro
 WORKDIR /app
-COPY . /app
 
-# Install Python deps
-RUN pip install -r requirements.txt
+# 4. Installazione dipendenze Python
+# Copiamo prima il requirements per sfruttare la cache di Docker
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-ENTRYPOINT ["python", "run_analyzer.py"]
+# 5. Copia del codice sorgente
+COPY src/ ./src/
+
+# 6. Creazione directory per i dati (punto di mount)
+RUN mkdir -p /app/data/input /app/data/output
+
+# 7. Comando di default
+# Esegue lo script principale. 
+# Assumiamo che main.py sia dentro src/ ma lo eseguiamo come modulo per gestire gli import
+ENV PYTHONPATH="/app"
+ENTRYPOINT ["python", "-m", "src.main"]
