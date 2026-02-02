@@ -1,11 +1,42 @@
+# ============================================================
+# TERRAFORM QUALITY & SECURITY EVOLUTION - OPERATIONAL MANUAL
+# ============================================================
+
+# 1. BUILD THE ENVIRONMENT
+# Build the Docker image containing Python, Trivy, and all dependencies.
 docker build -t terra-miner .
 
+# 2. MAIN EXECUTION (Mining & Data Collection)
+# Launch the main mining process. It supports incremental resume.
+# Mounts the current directory to /app to store CSV results and logs locally.
 docker run --rm -v ${PWD}:/app terra-miner
 
+# 3. DATABASE INSPECTION
+# Verify tables and columns within the TerraDS SQLite database.
 docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/inspect_db.py
 
+# 4. MODULE TESTING (Dry Runs)
+# Test the repository loader (Target selection logic)
 docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/mining/terrads_loader.py
 
+# Test the Quality Metric Extractor (HCL2 parser)
 docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/metrics/quality_model.py
 
+# Test the Security Debt Extractor (Trivy wrapper)
 docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/metrics/security_model.py
+
+# 5. STATISTICAL ANALYSIS (Post-Mining)
+# Run these commands after the dataset_final_FIXED.csv is generated.
+
+# RQ1 - Correlation Analysis
+docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/analysis/rq1_correlation.py
+
+# RQ2 - Prediction Analysis (Random Forest)
+docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/analysis/rq2_prediction.py
+
+# RQ3 - Evolutionary Analysis (Mann-Kendall)
+docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/analysis/rq3_evolution.py
+
+# 6. SYSTEM CLEANUP
+# Remove unused Docker layers and caches to free up space.
+docker system prune -f

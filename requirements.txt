@@ -1,19 +1,24 @@
-# Mining e Parsing
+# --- Mining e Parsing ---
 pydriller==2.6
 python-hcl2==4.3.2
 
-# Gestione Dati e Database
+# --- Gestione Dati e Database ---
+# Aggiungiamo pyarrow per eliminare i Warning e velocizzare Pandas
 pandas==2.2.0
 numpy==1.26.3
+pyarrow==15.0.0
 
-# Statistica e Machine Learning
+# --- Statistica e Machine Learning ---
 scipy==1.11.4
 scikit-learn==1.4.0
-pymannkendall==1.4.3  # Essenziale per il test di Mann-Kendall (RQ3)
+pymannkendall==1.4.3
+statsmodels==0.14.1    # Utile per test statistici supplementari se necessari
 
-# Grafici
+# --- Grafici e Visualizzazione ---
 matplotlib==3.8.2
 seaborn==0.13.2
 
-# Utilità
-tqdm==4.66.1          # Barre di caricamento (fondamentale quando analizzi tanti commit)
+# --- Utilità ---
+tqdm==4.66.1
+# python-dateutil aiuta a gestire fusi orari complessi nelle date di Git
+python-dateutil==2.8.2

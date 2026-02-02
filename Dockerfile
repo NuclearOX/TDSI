@@ -1,16 +1,19 @@
-# Usa un'immagine base leggera di Python
+# Use an official lightweight Python runtime as a parent image
 FROM python:3.11-slim
 
-# Metadati
-LABEL description="Replication Package for Terraform Quality & Security Evolution"
+# Metadata description for the research project
+LABEL description="Replication Package for Terraform Quality & Security Evolution Analysis"
 
-# Variabili d'ambiente per Python
+# Set environment variables for Python performance and stability
+# PYTHONDONTWRITEBYTECODE: Prevents Python from writing .pyc files
+# PYTHONUNBUFFERED: Ensures that python output is sent straight to terminal (useful for logging)
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# 1. Installazione dipendenze di sistema
-# git: necessario per PyDriller
-# curl: necessario per scaricare Trivy
+# 1. Install system dependencies
+# git: required by PyDriller for repository mining
+# curl: required to download the Trivy installation script
+# ca-certificates: required for secure downloads
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     git \
@@ -18,29 +21,34 @@ RUN apt-get update && \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Installazione di Trivy (Security Scanner)
-# Scarica ed esegue lo script ufficiale di installazione
+# 2. Install Trivy (Security Scanner)
+# Downloads and executes the official installation script
 RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-# Questo crea la cache in /root/.cache/trivy
-RUN trivy image --download-db-only
+# 3. Pre-download Trivy databases
+# We download both the Vulnerability DB and the Misconfiguration (IaC) bundle
+# This prevents network-related timeouts during the 3-day mining process
+RUN trivy fs --download-db-only && \
+    trivy fs . --download-db-only
 
-# 3. Setup dell'ambiente di lavoro
+# 4. Set the working directory inside the container
 WORKDIR /app
 
-# 4. Installazione dipendenze Python
-# Copiamo prima il requirements per sfruttare la cache di Docker
+# 5. Install Python dependencies
+# Copy requirements file first to leverage Docker layer caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Copia del codice sorgente
+# 6. Copy the source code into the container
 COPY src/ ./src/
 
-# 6. Creazione directory per i dati (punto di mount)
+# 7. Create data directories for input (TerraDS) and output (CSV/Logs)
+# These should be mounted as volumes during execution
 RUN mkdir -p /app/data/input /app/data/output
 
-# 7. Comando di default
-# Esegue lo script principale. 
-# Assumiamo che main.py sia dentro src/ ma lo eseguiamo come modulo per gestire gli import
+# 8. Set Python Path and Entrypoint
+# We set PYTHONPATH to /app so that 'src' is recognized as a package
 ENV PYTHONPATH="/app"
+
+# We execute the main script as a module (-m) to handle relative imports correctly
 ENTRYPOINT ["python", "-m", "src.main"]

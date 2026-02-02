@@ -1,16 +1,41 @@
-# Ignora i dati (sono troppo grandi o sensibili)
-data/output/*
-!data/output/.gitkeep
-data/input/*
-!data/input/.gitkeep
+# --- Project Data (large or sensitive files) ---
+data/
 others/
-.venv
-.github
-*.pdf
+*.sqlite
+*.csv
+*.log
 
-# Ignora file temporanei Python
+# --- Python & Virtual Environments ---
+.venv/
+venv/
+ENV/
+env/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.mypy_cache/
 
-# Ignora file di sistema
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.cursor/
+
+# --- Documentation & Papers ---
+*.pdf
+*.docx
+
+# --- Infrastructure as Code (Terraform/Trivy temp files) ---
+.terraform/
+.terragrunt-cache/
+trivy-cache/
+.trivy/
+
+# --- System Files ---
 .DS_Store
+.github
+Thumbs.db

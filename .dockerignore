@@ -1,12 +1,33 @@
+# --- Version Control ---
 .git
 .gitignore
+
+# --- Python Junk ---
 .venv
 venv
+ENV
+env
 __pycache__
 *.pyc
-.DS_Store
+*.pyo
+*.pyd
+.pytest_cache
+
+# --- Data & Logs (IMPORTANT: These are mounted as volumes, not copied) ---
+data/
+others/
+*.log
+*.sqlite
+*.csv
+
+# --- IDEs & Editors ---
 .vscode
+.idea
+.cursor
+*.swp
+
+# --- Research/Temp Files ---
 terraform_samples
-# output
-# calibrated_weights.json
-.env
+results/
+figures/
+*.pdf
