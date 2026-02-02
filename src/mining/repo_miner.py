@@ -27,7 +27,7 @@ class RepoMiner:
         Main mining workflow:
         1. Clones a repository once into a temporary directory.
         2. Intelligently samples snapshots (Tags or Commits) across the project's timeline.
-        3. Analyzes each snapshot, using a content-based cache to skip redundant calculations.
+        3. Analyzes each snapshot by checking out its state.
         4. Cleans up all temporary files.
         """
         logger.info(f"Starting SMART mining for: {self.repo_name}")
@@ -53,14 +53,75 @@ class RepoMiner:
 
             logger.info(f"Selected {len(commits_to_analyze)} representative snapshots for analysis.")
 
-            # 3. ANALYZE SELECTED SNAPSHOTS WITH CACHING
-            repo_mining = Repository(path_to_repo=clone_path, only_commits=commits_to_analyze)
-
+            # 3. ANALYZE SELECTED SNAPSHOTS
             last_tf_hash = None
             last_metrics = None
 
+            # CORREZIONE: Niente 'with', istanziamo normalmente
+            repo_mining = Repository(path_to_repo=clone_path, only_commits=commits_to_analyze)
+
             for commit in repo_mining.traverse_commits():
-                yield from self._analyze_commit(commit, last_tf_hash, last_metrics)
+                try:
+                    # CORREZIONE: Checkout manuale brutale con subprocess.
+                    # Questo FORZA i file nella cartella ad aggiornarsi a questo commit.
+                    # È il metodo più sicuro per garantire che le metriche cambino.
+                    subprocess.run(
+                        ["git", "checkout", "-f", commit.hash],
+                        cwd=clone_path,
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL,
+                        check=True
+                    )
+
+                    # Calcoliamo l'hash del contenuto dei file .tf nello stato attuale
+                    current_tf_hash = self._calculate_tf_content_hash(clone_path)
+                    
+                    # LOGICA DI CACHING
+                    if last_tf_hash and current_tf_hash == last_tf_hash and last_metrics:
+                        yield self._create_data_point(commit, last_metrics, "SKIPPED_DUPLICATE")
+                        continue 
+
+                    # Eseguiamo l'analisi completa sul path che ORA contiene i file giusti
+                    q_analyzer = QualityAnalyzer(clone_path)
+                    q_metrics = q_analyzer.analyze()
+
+                    # Se non c'è codice Terraform, saltiamo
+                    if q_metrics['loc'] == 0:
+                        continue
+
+                    s_analyzer = SecurityAnalyzer(clone_path)
+                    s_metrics = s_analyzer.analyze()
+
+                    # Se l'analisi di sicurezza fallisce, scartiamo
+                    if s_metrics is None:
+                        logger.warning(f"Security analysis failed for {commit.hash[:7]}. Discarding snapshot.")
+                        continue
+                    
+                    # Logging
+                    log_msg = (
+                        f"  [{commit.hash[:7]}] {commit.author_date.date()} | "
+                        f"LOC: {q_metrics['loc']} | "
+                        f"Complexity: {q_metrics['iac_mccabe_complexity']} | "
+                        f"Hard-coded: {q_metrics['hard_coded_values']} | "
+                        f"SecDebt: {s_metrics['security_debt_score']}"
+                    )
+                    logger.info(log_msg)
+
+                    full_metrics = {**q_metrics, **s_metrics}
+                    
+                    # Aggiorniamo cache
+                    last_tf_hash = current_tf_hash
+                    last_metrics = full_metrics
+
+                    yield self._create_data_point(commit, full_metrics, "ANALYZED")
+
+                except Exception as e:
+                    logger.error(f"Failed to process commit {commit.hash[:7]}: {e}")
+                    # Tentativo di reset in caso di errore
+                    try:
+                        subprocess.run(["git", "reset", "--hard"], cwd=clone_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except:
+                        pass
 
         except subprocess.TimeoutExpired:
             logger.error(f"Git clone timed out for {self.repo_url}")
@@ -71,7 +132,15 @@ class RepoMiner:
         finally:
             # 4. CLEANUP
             if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                try:
+                    # Su Windows a volte i file git sono read-only e shutil fallisce,
+                    # proviamo a forzare la rimozione
+                    def remove_readonly(func, path, excinfo):
+                        os.chmod(path, 0o777)
+                        func(path)
+                    shutil.rmtree(temp_dir, onerror=remove_readonly)
+                except Exception as e:
+                    logger.error(f"Cleanup error: {e}")
 
     def _select_smart_snapshots(self, path: str):
         """
@@ -129,54 +198,6 @@ class RepoMiner:
                     except FileNotFoundError:
                         continue # File might be a broken symlink
         return hasher.hexdigest()
-
-    def _analyze_commit(self, commit, last_tf_hash, last_metrics):
-        """
-        Analyzes a single commit, applying caching logic.
-        """
-        try:
-            current_path = commit.project_path
-            current_tf_hash = self._calculate_tf_content_hash(current_path)
-            
-            # CACHING LOGIC: If .tf content is identical, reuse old results
-            if last_tf_hash and current_tf_hash == last_tf_hash and last_metrics:
-                yield self._create_data_point(commit, last_metrics, "SKIPPED_DUPLICATE")
-                return
-
-            # Perform full analysis if content has changed
-            q_analyzer = QualityAnalyzer(current_path)
-            q_metrics = q_analyzer.analyze()
-
-            if q_metrics['loc'] == 0: return
-
-            s_analyzer = SecurityAnalyzer(current_path)
-            s_metrics = s_analyzer.analyze()
-
-            # HANDLE TRIVY FAILURE: If s_metrics is None, discard this snapshot
-            if s_metrics is None:
-                logger.warning(f"Security analysis failed for {commit.hash[:7]}. Discarding snapshot.")
-                return
-            
-            # --- DETAILED LOGGING FOR SUCCESSFUL ANALYSIS ---
-            log_msg = (
-                f"  [{commit.hash[:7]}] {commit.author_date.date()} | "
-                f"LOC: {q_metrics['loc']} | "
-                f"Complexity: {q_metrics['iac_mccabe_complexity']} | "
-                f"Hard-coded: {q_metrics['hard_coded_values']} | "
-                f"SecDebt: {s_metrics['security_debt_score']}"
-            )
-            logger.info(log_msg)
-
-            full_metrics = {**q_metrics, **s_metrics}
-            
-            # Update cache for the next iteration
-            last_tf_hash = current_tf_hash
-            last_metrics = full_metrics
-
-            yield self._create_data_point(commit, full_metrics, "ANALYZED")
-
-        except Exception as e:
-            logger.error(f"Failed to process commit {commit.hash[:7]}: {e}")
             
     def _create_data_point(self, commit, metrics, mode):
         """
