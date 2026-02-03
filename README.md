@@ -45,6 +45,11 @@ TerraPulse/
 
 ## Usage Guide
 
+### 0. Primary Setup
+1. Create the `data/` folder in the project root.
+2. Inside `data/`, create the `input/` and `output/` subfolders.
+3. Download the **TerraDS.sqlite** file from [Zenodo](https://zenodo.org/records/14217386) and place it inside `data/input/`.
+
 ### 1. Build the Environment
 Ensure Docker is installed, then build the research image:
 ```bash
