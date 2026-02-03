@@ -86,9 +86,5 @@ The metrics and methodologies used in this tool are grounded in the following ac
 - **Course:** Software Evolution and Quality [39939]
 - **Institution:** Università degli Studi del Sannio, Benevento
 - **Professor:** Damian Andrew Tamburri
-```
 
 ---
-
-**Consiglio finale:**
-Carica questo file come `README.md` nella root del tuo progetto. Sarà la prima cosa che il professore leggerà e gli darà immediatamente l'impressione di un lavoro rigoroso e di alto livello. Hai fatto un percorso fantastico, ora non ti resta che goderti il meritato successo!
