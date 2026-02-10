@@ -48,7 +48,7 @@ class SecurityAnalyzer:
         if not os.path.exists(self.repo_path):
             return None
 
-        dirs_to_skip = ".terraform,.git"
+        dirs_to_skip = ".terraform,.git,.idea,.vscode,node_modules,examples,example,tests,test,fixtures,modules_override,vendor"
         
         # Calculate Python timeout to be greater than Trivy's internal timeout
         trivy_minutes = int(config.TRIVY_CLI_TIMEOUT.replace('m', ''))
@@ -72,11 +72,12 @@ class SecurityAnalyzer:
             )
             
             # If stdout is empty but stderr has a fatal error, it's a failure
-            if not result.stdout and result.stderr and ("fatal" in result.stderr.lower() or "error" in result.stderr.lower()):
-                logger.warning(f"Trivy reported a fatal error: {result.stderr[:300]}...")
-                return None
+            if not result.stdout:
+                if result.stderr and ("fatal" in result.stderr.lower() or "error" in result.stderr.lower()):
+                    logger.warning(f"Trivy fatal error: {result.stderr[:300]}...")
+                return {} # Return empty dict instead of None for non-fatal empty output
             
-            return json.loads(result.stdout) if result.stdout else {}
+            return json.loads(result.stdout)
             
         except subprocess.TimeoutExpired:
             logger.error(f"Trivy TIMEOUT (Python process killed it after {python_timeout}s) on {self.repo_path}")

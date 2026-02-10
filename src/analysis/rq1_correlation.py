@@ -52,11 +52,12 @@ def analyze_rq1():
     # ---------------------------------------------------------
     # 3. FILTRO CRUCIALE: Unique Code States per Repository
     # Rimuoviamo i duplicati temporali dove nulla è cambiato.
-    # Se il codice è identico, non è una nuova informazione per la correlazione.
     # ---------------------------------------------------------
     subset_for_uniqueness = ['repo_name', 'loc', 'num_resources', 'iac_mccabe_complexity', 'security_debt_score']
-    # Aggiungiamo altre colonne se esistono
-    if 'num_variables' in df.columns: subset_for_uniqueness.append('num_variables')
+    # Aggiungiamo altre colonne se esistono per rendere l'unicità più precisa
+    for optional_col in ['num_variables', 'hard_coded_values']:
+        if optional_col in df.columns:
+            subset_for_uniqueness.append(optional_col)
     
     df_unique = df.drop_duplicates(subset=subset_for_uniqueness)
     
@@ -67,19 +68,27 @@ def analyze_rq1():
     # 4. Normalizzazione (Density Metrics)
     # Calcoliamo le densità sul dataset pulito
     df_unique = df_unique.copy() # Evita SettingWithCopyWarning
+    
+    # Security Debt Density
     df_unique['sec_debt_density'] = df_unique['security_debt_score'] / df_unique['loc']
     
+    # Metriche Strutturali Normalizzate
     if 'iac_mccabe_complexity' in df_unique.columns:
         df_unique['complexity_density'] = df_unique['iac_mccabe_complexity'] / df_unique['loc']
         
     if 'hard_coded_values' in df_unique.columns:
         df_unique['hard_coded_density'] = df_unique['hard_coded_values'] / df_unique['loc']
+    
+    # --- CORREZIONE: Aggiunto calcolo comment_density che mancava ---
+    if 'comment_lines' in df_unique.columns:
+        df_unique['comment_density'] = df_unique['comment_lines'] / df_unique['loc']
 
     # 5. Definizione Variabili
     quality_metrics_candidates = [
         'loc', 'num_resources', 'num_modules', 'iac_mccabe_complexity',
         'complexity_density', 'num_providers', 'hard_coded_values',
-        'hard_coded_density', 'num_variables', 'num_outputs'
+        'hard_coded_density', 'comment_density', 'internal_references',
+        'num_variables', 'num_outputs'
     ]
     quality_metrics = [m for m in quality_metrics_candidates if m in df_unique.columns]
     target = 'security_debt_score'
@@ -87,19 +96,21 @@ def analyze_rq1():
     # 6. Calcolo Correlazione di Spearman
     results = []
     for metric in quality_metrics:
-        # Spearman tra metrica di qualità e debito di sicurezza
+        # Spearman tra metrica di qualità e debito di sicurezza ASSOLUTO
         corr, p_value = spearmanr(df_unique[metric], df_unique[target])
         
         results.append({
+            'Target': 'Security Debt (Abs)',
             'Quality Metric': metric,
             'Spearman Coeff': round(corr, 3),
             'P-Value': p_value,
             'Significant': 'YES' if p_value < 0.05 else 'NO'
         })
         
-        # Correlazione anche con la densità (ancora più rigoroso)
+        # Correlazione con la DENSITÀ (più rigoroso per confrontare progetti diversi)
         corr_d, p_d = spearmanr(df_unique[metric], df_unique['sec_debt_density'])
         results.append({
+            'Target': 'Security Debt (Density)',
             'Quality Metric': f"{metric} (vs Density)",
             'Spearman Coeff': round(corr_d, 3),
             'P-Value': p_d,
@@ -111,28 +122,34 @@ def analyze_rq1():
     results_df.to_csv(stats_path, index=False)
 
     print("\n--- Top Correlations (Unique States Only) ---")
-    print(results_df.sort_values(by='Spearman Coeff', ascending=False).head(10).to_string(index=False))
+    # Mostriamo solo le correlazioni con il debito assoluto per brevità a video
+    display_df = results_df[results_df['Target'] == 'Security Debt (Abs)']
+    print(display_df.sort_values(by='Spearman Coeff', ascending=False).head(10).to_string(index=False))
 
     # 7. Heatmap
     cols_for_heatmap = quality_metrics + [target, 'sec_debt_density']
     plt.figure(figsize=(14, 12))
     # Usiamo solo le colonne esistenti
     cols_present = [c for c in cols_for_heatmap if c in df_unique.columns]
-    corr_matrix = df_unique[cols_present].corr(method='spearman')
     
-    sns.heatmap(
-        corr_matrix, 
-        annot=True, 
-        cmap='coolwarm', 
-        center=0,
-        fmt='.2f',
-        linewidths=.5,
-        annot_kws={"size": 10}
-    )
-    plt.title('RQ1: Spearman Correlation Matrix (Unique Code States Only)')
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, 'rq1_heatmap_unique.png'), dpi=300)
-    print(f"\nAnalisi completata. Risultati salvati in {OUTPUT_DIR}")
+    if len(cols_present) > 1:
+        corr_matrix = df_unique[cols_present].corr(method='spearman')
+        
+        sns.heatmap(
+            corr_matrix, 
+            annot=True, 
+            cmap='coolwarm', 
+            center=0,
+            fmt='.2f',
+            linewidths=.5,
+            annot_kws={"size": 10}
+        )
+        plt.title('RQ1: Spearman Correlation Matrix (Unique Code States Only)')
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIR, 'rq1_heatmap_unique.png'), dpi=300)
+        print(f"\nAnalisi completata. Risultati salvati in {OUTPUT_DIR}")
+    else:
+        print("Non ci sono abbastanza colonne per generare la heatmap.")
 
 if __name__ == "__main__":
     analyze_rq1()

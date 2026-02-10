@@ -1,24 +1,25 @@
-# --- Mining e Parsing ---
+# --- Mining & Parsing ---
 pydriller==2.6
 python-hcl2==4.3.2
 
-# --- Gestione Dati e Database ---
-# Aggiungiamo pyarrow per eliminare i Warning e velocizzare Pandas
+# --- Data Handling ---
 pandas==2.2.0
 numpy==1.26.3
 pyarrow==15.0.0
 
-# --- Statistica e Machine Learning ---
+# --- Stats & ML ---
 scipy==1.11.4
 scikit-learn==1.4.0
+statsmodels==0.14.1
 pymannkendall==1.4.3
-statsmodels==0.14.1    # Utile per test statistici supplementari se necessari
 
-# --- Grafici e Visualizzazione ---
+# --- Visualization ---
 matplotlib==3.8.2
 seaborn==0.13.2
 
-# --- Utilità ---
+# --- Utilities ---
 tqdm==4.66.1
-# python-dateutil aiuta a gestire fusi orari complessi nelle date di Git
 python-dateutil==2.8.2
+jinja2==3.1.3
+plotly==5.18.0
+nbformat==5.9.2
