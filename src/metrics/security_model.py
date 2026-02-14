@@ -48,7 +48,7 @@ class SecurityAnalyzer:
         if not os.path.exists(self.repo_path):
             return None
 
-        dirs_to_skip = ".terraform,.git,.idea,.vscode,node_modules,examples,example,tests,test,fixtures,modules_override,vendor"
+        dirs_to_skip = ".terraform,.git,.github,.idea,.vscode,node_modules,examples,example,tests,test,fixtures,modules_override,vendor"
         
         # Calculate Python timeout to be greater than Trivy's internal timeout
         trivy_minutes = int(config.TRIVY_CLI_TIMEOUT.replace('m', ''))

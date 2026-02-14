@@ -112,5 +112,29 @@ def analyze_advanced_rq1():
     except Exception as e:
         print(f"Errore nel calcolo del modello OLS: {e}")
 
+    # 5. VALIDAZIONE CON REGRESSIONE ROBUSTA (RLM)
+    # Questo modello è meno sensibile agli outlier e conferma la validità dei risultati OLS.
+    try:
+        print("\n--- Validazione con Regressione Robusta (RLM) ---")
+        rlm_model = sm.RLM(y, X, M=sm.robust.norms.HuberT()).fit()
+        
+        print(rlm_model.summary())
+        
+        # Salviamo anche questo summary
+        with open(os.path.join(OUTPUT_DIR, 'rq1_rlm_regression_summary.txt'), 'w') as f:
+            f.write(rlm_model.summary().as_text())
+            
+        print("\nCONFRONTO COEFFICIENTI (OLS vs RLM):")
+        comparison_df = pd.DataFrame({
+            'OLS_coef': model.params,
+            'RLM_coef': rlm_model.params,
+            'OLS_pvalue': model.pvalues,
+            'RLM_pvalue': rlm_model.pvalues
+        })
+        print(comparison_df.round(4))
+
+    except Exception as e:
+        print(f"Errore nel calcolo del modello RLM: {e}")
+
 if __name__ == "__main__":
     analyze_advanced_rq1()

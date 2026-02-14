@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score, KFold
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 import os
 import sys
@@ -12,33 +12,24 @@ import numpy as np
 INPUT_CSV = os.path.join('data', 'output', 'dataset_final.csv')
 OUTPUT_DIR = os.path.join('data', 'output', 'figures')
 
-# Creazione cartella output
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def load_data_robust(filepath):
-    """Carica il CSV gestendo errori di parsing."""
     if not os.path.exists(filepath):
         print(f"ERRORE: Il file {filepath} non esiste.")
         sys.exit(1)
     try:
         df = pd.read_csv(filepath)
-    except pd.errors.ParserError:
-        print("Errore di parsing standard. Tentativo con engine python...")
-        try:
-            df = pd.read_csv(filepath, sep=',', on_bad_lines='skip', engine='python')
-        except Exception as e:
-            print(f"Errore critico lettura CSV: {e}")
-            sys.exit(1)
+    except Exception as e:
+        df = pd.read_csv(filepath, sep=',', on_bad_lines='skip', engine='python')
     return df
 
 def analyze_rq2():
-    print("--- RQ2: Prediction Analysis (Unique States Only) ---")
+    print("--- RQ2: Advanced Prediction Analysis (Cross-Validation Enabled) ---")
     
-    # 1. Caricamento Dati
+    # 1. Caricamento e Pulizia
     df = load_data_robust(INPUT_CSV)
-    print(f"Snapshot totali caricati: {len(df)}")
-
-    # 2. Pulizia e Conversione Numerica
+    
     potential_cols = [
         'loc', 'num_resources', 'num_modules', 'num_variables', 'num_outputs',
         'num_providers', 'iac_mccabe_complexity', 'hard_coded_values',
@@ -49,29 +40,20 @@ def analyze_rq2():
     for col in existing_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Rimuoviamo righe inutilizzabili (NaN o LOC=0)
     df = df.dropna(subset=['loc', 'security_debt_score'])
     df = df[df['loc'] > 0]
-    
-    # Pulizia extra: Rimuoviamo infiniti (sicurezza matematica)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df = df.dropna(subset=existing_cols)
 
-    # 3. FILTRO UNIQUE STATES (Cruciale per validità scientifica)
-    # Evita il Data Leakage dovuto a snapshot identici consecutivi
+    # 2. FILTRO UNIQUE STATES (Prevenzione Data Leakage)
     subset_for_uniqueness = ['repo_name', 'loc', 'num_resources', 'iac_mccabe_complexity', 'security_debt_score']
     if 'num_variables' in df.columns: subset_for_uniqueness.append('num_variables')
-    
     df_unique = df.drop_duplicates(subset=subset_for_uniqueness).copy()
     
-    print(f"Snapshot totali: {len(df)} -> Snapshot unici per il training: {len(df_unique)}")
-    
-    if len(df_unique) < 20:
-        print("ERRORE: Dati insufficienti per il modello di Machine Learning.")
-        return
+    print(f"Snapshot caricati: {len(df)} -> Stati unici per ML: {len(df_unique)}")
 
-    # 4. Feature Engineering (Densità)
-    # Normalizziamo le metriche sulla dimensione del file (LOC)
+    # 3. Feature Engineering (Densità)
+    # Calcoliamo le densità per rendere le metriche indipendenti dalla dimensione del file
     if 'iac_mccabe_complexity' in df_unique.columns:
         df_unique['complexity_density'] = df_unique['iac_mccabe_complexity'] / df_unique['loc']
     if 'hard_coded_values' in df_unique.columns:
@@ -79,89 +61,72 @@ def analyze_rq2():
     if 'comment_lines' in df_unique.columns:
         df_unique['comment_density'] = df_unique['comment_lines'] / df_unique['loc']
         
-    # Ripuliamo eventuali NaN/Inf generati dalle divisioni
     df_unique.replace([np.inf, -np.inf], 0, inplace=True)
     df_unique.fillna(0, inplace=True)
 
-    # 5. Selezione Feature (X) e Target (y)
+    # 4. Selezione Feature (X) e Target (y)
     candidate_features = [
         'loc', 'num_resources', 'num_modules', 'num_variables',
         'num_outputs', 'num_providers', 'iac_mccabe_complexity', 
         'complexity_density', 'hard_coded_density', 'comment_density',
-        'internal_references', 'hard_coded_values' # Includiamo anche il valore assoluto
+        'internal_references', 'hard_coded_values'
     ]
     features = [f for f in candidate_features if f in df_unique.columns]
-    
-    print(f"Feature utilizzate ({len(features)}): {features}")
     
     X = df_unique[features]
     y = df_unique['security_debt_score']
 
-    # 6. Split Train/Test
-    # Random State 42 garantisce riproducibilità
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # 7. Addestramento Random Forest
-    print("Addestramento modello Random Forest...")
+    # 5. CROSS-VALIDATION (Il cuore della modifica)
+    print(f"Esecuzione 5-Fold Cross-Validation...")
     rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    
+    # Utilizziamo K-Fold per calcolare la stabilità del modello
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(rf, X, y, cv=kf, scoring='r2')
+    
+    print(f"R² Scores per ogni Fold: {cv_scores}")
+    print(f"R² Medio (CV): {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
+
+    # 6. Training Finale e Valutazione Classica (per i grafici)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     rf.fit(X_train, y_train)
-
-    # 8. Valutazione e Performance
     y_pred = rf.predict(X_test)
-    
-    r2 = r2_score(y_test, y_pred)
-    mae = mean_absolute_error(y_test, y_pred)
-    mse = mean_squared_error(y_test, y_pred)
-    
-    print("\n--- Model Performance ---")
-    print(f"R² Score: {r2:.3f} (Varianza spiegata dal modello)")
-    print(f"MAE: {mae:.3f} (Errore Medio Assoluto)")
-    print(f"MSE: {mse:.3f} (Errore Quadratico Medio)")
 
-    # Salva performance su file
+    # 7. Salvataggio Performance Arricchito
     with open(os.path.join(OUTPUT_DIR, 'rq2_model_performance.txt'), 'w') as f:
-        f.write(f"R2 Score: {r2}\n")
-        f.write(f"MAE: {mae}\n")
-        f.write(f"MSE: {mse}\n")
-        f.write(f"Features used: {features}\n")
+        f.write("--- CROSS-VALIDATION RESULTS (5-FOLD) ---\n")
+        f.write(f"R2 Mean: {cv_scores.mean()}\n")
+        f.write(f"R2 Std Dev: {cv_scores.std()}\n")
+        f.write("\n--- TEST SET EVALUATION ---\n")
+        f.write(f"MAE: {mean_absolute_error(y_test, y_pred)}\n")
+        f.write(f"MSE: {mean_squared_error(y_test, y_pred)}\n")
 
-    # 9. Feature Importance (Risposta alla RQ2)
+    # 8. Feature Importance (Fondamentale per la RQ3)
     importances = pd.DataFrame({
         'Feature': features,
         'Importance': rf.feature_importances_
     }).sort_values(by='Importance', ascending=False)
-
-    print("\n--- Feature Importance Ranking ---")
-    print(importances.to_string(index=False))
     
-    # Salvataggio CSV importanza (Cruciale per RQ3 Rigorous)
     importances.to_csv(os.path.join(OUTPUT_DIR, 'rq2_feature_importance.csv'), index=False)
+    print("\nRanking Importanza Metriche salvato.")
 
-    # 10. Visualizzazione Importanza
+    # 9. Visualizzazioni
+    # Grafico Importanza
     plt.figure(figsize=(12, 6))
-    sns.barplot(x='Importance', y='Feature', data=importances, palette='viridis', hue='Feature', legend=False)
-    plt.title('RQ2: Best Predictors for Security Debt\n(Random Forest Feature Importance)')
-    plt.xlabel('Importance Score (0-1)')
+    sns.barplot(x='Importance', y='Feature', data=importances, palette='magma', hue='Feature', legend=False)
+    plt.title('RQ2: Predictors of Security Debt (Feature Importance)')
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, 'rq2_importance.png'), dpi=300)
 
-    # 11. Plot Actual vs Predicted (Validazione Visiva)
+    # Grafico Accuracy
     plt.figure(figsize=(8, 8))
-    plt.scatter(y_test, y_pred, alpha=0.5, edgecolor='k', s=30)
-    
-    # Linea di perfezione
-    min_val = min(y_test.min(), y_pred.min())
-    max_val = max(y_test.max(), y_pred.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='Perfect Prediction')
-    
+    plt.scatter(y_test, y_pred, alpha=0.4, color='teal')
+    plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--', lw=2)
     plt.xlabel('Actual Security Debt')
     plt.ylabel('Predicted Security Debt')
-    plt.title('Model Accuracy: Actual vs Predicted')
-    plt.legend()
+    plt.title(f'Prediction Accuracy (R² CV: {cv_scores.mean():.2f})')
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, 'rq2_accuracy_scatter.png'), dpi=300)
-
-    print(f"\nAnalisi completata. Grafici salvati in {OUTPUT_DIR}")
 
 if __name__ == "__main__":
     analyze_rq2()

@@ -127,6 +127,7 @@ def main():
             # We use get_nowait because the process is finished, the queue should have data
             repo_results = queue.get_nowait()
         except Exception:
+            logger.error(f"Process died unexpectedly for {repo_name} (Possible OOM)")
             repo_results = []
 
         # 3. INCREMENTAL SAVING (Append Mode)
