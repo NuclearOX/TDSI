@@ -4,12 +4,13 @@
 
 # 1. BUILD THE ENVIRONMENT
 # Build the Docker image containing Python, Trivy, and all dependencies.
-docker build -t terra-miner .
+docker build -t terrapulse .
 
 # 2. MAIN EXECUTION (Mining & Data Collection)
 # Launch the main mining process. It supports incremental resume.
 # Mounts the current directory to /app to store CSV results and logs locally.
-docker run --rm -v ${PWD}:/app terra-miner
+# SBAGLIATO! docker run --rm -v ${PWD}:/app terrapulse
+docker run --rm -v ${PWD}/data:/app/data terrapulse # GIUSTO!
 
 # 3. DATABASE INSPECTION
 # Verify tables and columns within the TerraDS SQLite database.

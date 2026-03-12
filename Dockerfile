@@ -10,11 +10,12 @@ LABEL description="Replication Package for Terraform Quality & Security Evolutio
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# 1. Install system dependencies
+# 1. Update + Install System Dependencies
 # git: required by PyDriller for repository mining
 # curl: required to download the Trivy installation script
 # ca-certificates: required for secure downloads
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
     git \
     curl \
@@ -27,7 +28,7 @@ RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/
 
 # 3. Pre-download Trivy databases
 # We download both the Vulnerability DB and the Misconfiguration (IaC) bundle
-# This prevents network-related timeouts during the 3-day mining process
+# This prevents network-related timeouts during the long mining process
 RUN trivy fs --download-db-only && \
     trivy fs . --download-db-only
 
@@ -37,7 +38,8 @@ WORKDIR /app
 # 5. Install Python dependencies
 # Copy requirements file first to leverage Docker layer caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # 6. Copy the source code into the container
 COPY src/ ./src/

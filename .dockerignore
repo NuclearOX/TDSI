@@ -13,7 +13,7 @@ __pycache__
 *.pyd
 .pytest_cache
 
-# --- Data & Logs (IMPORTANT: These are mounted as volumes, not copied) ---
+# --- Data & Logs ---
 data/
 others/
 *.log

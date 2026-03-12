@@ -1,160 +1,438 @@
-import pandas as pd
-import numpy as np
-import os
+"""
+rq3_statistics.py — RQ3 Evolutionary Analysis
+==============================================
+Research Question:
+    How do structural debt (StDI) and security debt (SDI) co-evolve during
+    the entire lifecycle of an IaC project, and what is the prevalence of
+    joint monotonic trends observable in the analysed population?
+
+Pipeline position:
+    Requires:
+        - data/output/dataset_final.csv
+        - data/output/retained_repos_after_trivy_filter.csv  (validate_sample.py)
+        - data/output/figures/rq2/rq2_feature_importance.csv  (rq2_prediction.py)
+    Produces:
+        - data/output/figures/rq3/rq3_per_repo_results.csv
+        - data/output/figures/rq3/rq3_trend_contingency.csv
+        - data/output/figures/rq3/rq3_numerical_summary.txt
+        - data/output/figures/rq3/selected_case_studies.json
+
+Preprocessing (consistent with all RQ scripts):
+    1. analysis_mode == 'ANALYZED'  (unique code states only)
+    2. Trivy filter: only repos in retained_repos_after_trivy_filter.csv
+    3. loc > 0 and security_debt_score not null
+
+StDI construction:
+    StDI_t = sum_i( z_score(metric_i)_t * importance_i )
+    where importance_i comes from rq2_feature_importance.csv.
+    Z-scores are computed per-repo (intra-project normalisation) so that
+    StDI captures structural variation relative to each project's own
+    history, not cross-project magnitude differences.
+
+Co-evolution analysis:
+    1. Mann-Kendall trend test on SDI and StDI independently per repo.
+       Produces a 3x3 contingency table of joint trend combinations
+       (increasing / no trend / decreasing) x (SDI / StDI).
+    2. Longitudinal Spearman correlation between StDI and SDI per repo.
+       Quantifies the strength and direction of co-movement.
+
+Case study selection:
+    One representative repo is selected per sufficiently populated cell
+    of the 3x3 contingency table (>= MIN_CELL_SIZE_FOR_CASE_STUDY repos).
+    Selection criterion: strongest absolute Spearman rho with n_snapshots
+    as tiebreaker. This ensures case studies illustrate the full diversity
+    of observed co-evolution behaviours without presupposing a taxonomy.
+"""
+
 import json
+import logging
+import os
+import sys
+import warnings
+
+import numpy as np
+import pandas as pd
 from scipy.stats import spearmanr
+
 try:
     import pymannkendall as mk
+    MK_AVAILABLE = True
 except ImportError:
-    print("Please install pymannkendall: pip install pymannkendall")
-    mk = None
+    MK_AVAILABLE = False
+    warnings.warn(
+        "pymannkendall not found. Mann-Kendall tests will be skipped. "
+        "Install with: pip install pymannkendall"
+    )
 
-# --- CONFIGURATION ---
-INPUT_CSV = os.path.join('data', 'output', 'dataset_final.csv')
-IMPORTANCE_CSV = os.path.join('data', 'output', 'figures', 'rq2_feature_importance.csv')
-OUTPUT_DIR = os.path.join('data', 'output', 'reports')
+sys.path.append(os.getcwd())
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Config import
+# ---------------------------------------------------------------------------
+try:
+    from src import config
+except ImportError:
+    logger.error("Could not import src.config. Run this script from the project root.")
+    sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+INPUT_CSV      = os.path.join(config.DATA_OUTPUT_DIR, "dataset_final.csv")
+RETAINED_CSV   = os.path.join(config.DATA_OUTPUT_DIR,
+                               "retained_repos_after_trivy_filter.csv")
+IMPORTANCE_CSV = os.path.join(config.DATA_OUTPUT_DIR, "figures", "rq2",
+                               "rq2_feature_importance.csv")
+OUTPUT_DIR     = os.path.join(config.DATA_OUTPUT_DIR, "figures", "rq3")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def analyze_rq3_statistics():
-    print("--- RQ3: Advanced Evolutionary & Statistical Analysis (Pattern Selection) ---")
-    
-    # 1. Load Data & Weights
-    if not os.path.exists(INPUT_CSV) or not os.path.exists(IMPORTANCE_CSV):
-        print("ERROR: Missing input files (dataset_final.csv or feature_importance.csv).")
-        return
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+# Minimum number of repos in a contingency cell to select a case study.
+MIN_CELL_SIZE_FOR_CASE_STUDY = 3
 
-    df = pd.read_csv(INPUT_CSV)
-    importance_df = pd.read_csv(IMPORTANCE_CSV)
-    weights = dict(zip(importance_df['Feature'], importance_df['Importance']))
+# Number of case studies to select per contingency cell.
+CASE_STUDIES_PER_CELL = 1
 
-    # 2. Feature Engineering (Recreate Densities)
-    df['loc'] = pd.to_numeric(df['loc'], errors='coerce').fillna(0)
-    
-    # Avoid division by zero
-    def safe_div(a, b): return a / b if b > 0 else 0
+# Ordered trend labels for the contingency table axes.
+TREND_LABELS = ["increasing", "no trend", "decreasing"]
 
-    if 'iac_mccabe_complexity' in df.columns:
-        df['complexity_density'] = df.apply(lambda x: safe_div(x['iac_mccabe_complexity'], x['loc']), axis=1)
-    if 'hard_coded_values' in df.columns:
-        df['hard_coded_density'] = df.apply(lambda x: safe_div(x['hard_coded_values'], x['loc']), axis=1)
-    if 'comment_lines' in df.columns:
-        df['comment_density'] = df.apply(lambda x: safe_div(x['comment_lines'], x['loc']), axis=1)
 
-    df.replace([np.inf, -np.inf], 0, inplace=True)
-    df.fillna(0, inplace=True)
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
-    # 3. Filter: Unique Code States
-    metrics = [m for m in weights.keys() if m in df.columns]
-    df = df.sort_values(by=['repo_name', 'author_date'])
-    df_unique = df.drop_duplicates(subset=['repo_name'] + metrics + ['security_debt_score']).copy()
+def _load_and_preprocess(input_csv: str, retained_csv: str) -> pd.DataFrame:
+    """
+    Loads dataset_final.csv and applies the standard three-step filter:
+        1. analysis_mode == 'ANALYZED'
+        2. Trivy filter (only repos in retained_repos_after_trivy_filter.csv)
+        3. loc > 0 and security_debt_score not null
 
-    results = []
-    
-    # 4. Analyze per Repository
-    for repo, group in df_unique.groupby('repo_name'):
-        if group['security_debt_score'].max() == 0:
-            continue    
-        
-        if len(group) < 15: # Strict threshold for case studies (Scientific Rigor)
+    Returns the filtered DataFrame sorted by repo_name and author_date.
+    """
+    logger.info("Loading dataset...")
+    df = pd.read_csv(input_csv, low_memory=False)
+    logger.info(f"  Raw rows: {len(df):,}")
+
+    df = df[df["analysis_mode"] == "ANALYZED"].copy()
+    logger.info(f"  After analysis_mode filter: {len(df):,} rows")
+
+    retained = pd.read_csv(retained_csv)["repo_name"].unique()
+    df = df[df["repo_name"].isin(retained)].copy()
+    logger.info(f"  After Trivy filter: {len(df):,} rows "
+                f"({df['repo_name'].nunique()} repos)")
+
+    df["loc"] = pd.to_numeric(df["loc"], errors="coerce")
+    df["security_debt_score"] = pd.to_numeric(
+        df["security_debt_score"], errors="coerce"
+    )
+    df = df[(df["loc"] > 0) & df["security_debt_score"].notna()].copy()
+    logger.info(f"  After loc/SDI filter: {len(df):,} rows "
+                f"({df['repo_name'].nunique()} repos)")
+
+    df["author_date"] = pd.to_datetime(
+        df["author_date"], errors="coerce", utc=True
+    )
+    df = df.sort_values(["repo_name", "author_date"]).reset_index(drop=True)
+    return df
+
+
+def _compute_stdi(group: pd.DataFrame, weights: dict) -> np.ndarray:
+    """
+    Computes the per-snapshot StDI series for a single repository.
+
+    StDI_t = sum_i( z_score(metric_i)_t * importance_i )
+
+    Z-scores are computed relative to the repo's own history so that
+    StDI captures intra-project structural variation over time.
+    Metrics absent from the DataFrame are silently skipped.
+    """
+    stdi = np.zeros(len(group))
+    for feature, weight in weights.items():
+        if feature not in group.columns:
             continue
-            
-        # A. Calculate StDI (Structural Debt Index)
-        stdi_series = np.zeros(len(group))
-        for feature, weight in weights.items():
-            if feature in group.columns:
-                vals = group[feature].values
-                std = vals.std()
-                z_score = (vals - vals.mean()) / std if std > 0 else 0
-                stdi_series += z_score * weight
-        
-        # B. Mann-Kendall Trend Test
-        sdi_series = group['security_debt_score'].values
-        loc_series = group['loc'].values
-        
-        trend_label = "no trend"
-        if mk:
-            try:
-                trend_res = mk.original_test(sdi_series)
-                trend_label = trend_res.trend
-            except: pass
+        vals = pd.to_numeric(group[feature], errors="coerce").fillna(0).values
+        std = vals.std()
+        if std > 0:
+            z = (vals - vals.mean()) / std
+        else:
+            z = np.zeros_like(vals)
+        stdi += z * weight
+    return stdi
 
-        # C. Longitudinal Correlation
-        corr, _ = spearmanr(stdi_series, sdi_series)
-        if np.isnan(corr): corr = 0
 
-        # D. Pattern Identification 
-        pattern = "Indeterminate"
-        
-        # Virtuous Refactoring: LOC decreases, Security Debt decreases
-        if loc_series[-1] < loc_series[0] and sdi_series[-1] < sdi_series[0]:
-            pattern = "Virtuous Refactoring"
-        # Chaotic Entropy: High variance relative to mean
-        elif np.mean(sdi_series) > 0 and (np.std(sdi_series) / np.mean(sdi_series)) > 0.5:
-            pattern = "Chaotic Entropy"
-        # Latent Risk: LOC grows, Debt explodes (final debt > 3x initial)
-        elif loc_series[-1] > loc_series[0] * 1.5 and sdi_series[-1] > sdi_series[0] * 3:
-            pattern = "Latent Risk"
-        # Industrial Stability: No significant trend
-        elif trend_label == "no trend":
-            pattern = "Industrial Stability"
+def _mann_kendall(series: np.ndarray) -> tuple:
+    """
+    Runs the original Mann-Kendall trend test on a time series.
 
-        results.append({
-            'repo': repo,
-            'snapshots': len(group),
-            'trend': trend_label,
-            'spearman_corr': corr,
-            'pattern': pattern,
-            'abs_corr': abs(corr) # Helper for sorting
+    Returns (trend_label, p_value) where trend_label is one of
+    'increasing', 'decreasing', or 'no trend'.
+    Returns ('no trend', None) if pymannkendall is unavailable or the
+    series is too short.
+    """
+    if not MK_AVAILABLE or len(series) < config.MIN_SNAPSHOTS_FOR_STATS:
+        return "no trend", None
+    try:
+        result = mk.original_test(series)
+        return result.trend, result.p
+    except Exception:
+        return "no trend", None
+
+
+def _build_contingency_table(results_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Builds a 3x3 contingency table of joint Mann-Kendall trend combinations.
+
+    Rows = SDI trend  (increasing / no trend / decreasing)
+    Cols = StDI trend (increasing / no trend / decreasing)
+
+    Cell values are repo counts. This is the primary quantitative answer
+    to the co-evolution question in RQ3.
+    """
+    contingency = pd.DataFrame(
+        0,
+        index=TREND_LABELS,
+        columns=TREND_LABELS,
+    )
+    contingency.index.name   = "SDI trend"
+    contingency.columns.name = "StDI trend"
+
+    for _, row in results_df.iterrows():
+        sdi_t  = row["mk_trend_sdi"]
+        stdi_t = row["mk_trend_stdi"]
+        if sdi_t in TREND_LABELS and stdi_t in TREND_LABELS:
+            contingency.loc[sdi_t, stdi_t] += 1
+
+    return contingency
+
+
+def _select_case_studies(
+    results_df: pd.DataFrame,
+    contingency: pd.DataFrame,
+) -> dict:
+    """
+    Selects one representative repo per sufficiently populated contingency
+    cell (>= MIN_CELL_SIZE_FOR_CASE_STUDY repos).
+
+    Selection criterion: strongest absolute Spearman rho with n_snapshots
+    as tiebreaker. This ensures case studies cover the full observed
+    diversity without presupposing a taxonomy.
+
+    Returns a dict mapping "{sdi_trend} SDI / {stdi_trend} StDI" -> [repo_name].
+    """
+    selected = {}
+    for sdi_t in TREND_LABELS:
+        for stdi_t in TREND_LABELS:
+            if contingency.loc[sdi_t, stdi_t] < MIN_CELL_SIZE_FOR_CASE_STUDY:
+                continue
+            candidates = results_df[
+                (results_df["mk_trend_sdi"]  == sdi_t) &
+                (results_df["mk_trend_stdi"] == stdi_t)
+            ].copy()
+            best = candidates.sort_values(
+                by=["abs_spearman_rho", "n_snapshots"],
+                ascending=False,
+            ).head(CASE_STUDIES_PER_CELL)
+            cell_label = f"{sdi_t} SDI / {stdi_t} StDI"
+            selected[cell_label] = best["repo_name"].tolist()
+            logger.info(f"  Case study [{cell_label}]: {selected[cell_label]}")
+    return selected
+
+
+# ---------------------------------------------------------------------------
+# Main analysis
+# ---------------------------------------------------------------------------
+
+def analyze_rq3_statistics() -> None:
+    logger.info("=" * 60)
+    logger.info("RQ3 — Evolutionary Analysis")
+    logger.info("=" * 60)
+
+    # 1. Validate inputs
+    for path, label in [
+        (INPUT_CSV,      "dataset_final.csv"),
+        (RETAINED_CSV,   "retained_repos_after_trivy_filter.csv"),
+        (IMPORTANCE_CSV, "rq2_feature_importance.csv"),
+    ]:
+        if not os.path.exists(path):
+            logger.error(f"Required input not found: {path} ({label})")
+            sys.exit(1)
+
+    # 2. Load data
+    df = _load_and_preprocess(INPUT_CSV, RETAINED_CSV)
+
+    importance_df = pd.read_csv(IMPORTANCE_CSV)
+    importance_df.columns = importance_df.columns.str.lower()
+    weights = dict(zip(importance_df["feature"], importance_df["importance"]))
+    logger.info(f"Loaded {len(weights)} feature weights from RQ2.")
+
+    # 3. Per-repository analysis
+    logger.info(f"Minimum snapshots required: {config.MIN_SNAPSHOTS_FOR_STATS}")
+
+    per_repo_results = []
+    skipped_too_few  = 0
+    skipped_zero_sdi = 0
+
+    for repo_name, group in df.groupby("repo_name"):
+        group = group.reset_index(drop=True)
+
+        if len(group) < config.MIN_SNAPSHOTS_FOR_STATS:
+            skipped_too_few += 1
+            continue
+
+        sdi_series = group["security_debt_score"].values
+        loc_series = group["loc"].values
+
+        if sdi_series.max() == 0:
+            skipped_zero_sdi += 1
+            continue
+
+        stdi_series = _compute_stdi(group, weights)
+
+        mk_trend_sdi,  mk_p_sdi  = _mann_kendall(sdi_series)
+        mk_trend_stdi, mk_p_stdi = _mann_kendall(stdi_series)
+
+        if len(stdi_series) >= 3:
+            corr, corr_p = spearmanr(stdi_series, sdi_series)
+            if np.isnan(corr):
+                corr, corr_p = 0.0, 1.0
+        else:
+            corr, corr_p = 0.0, 1.0
+
+        cv_sdi = (sdi_series.std() / sdi_series.mean()
+                  if sdi_series.mean() > 0 else 0.0)
+
+        per_repo_results.append({
+            "repo_name":        repo_name,
+            "n_snapshots":      len(group),
+            "loc_initial":      loc_series[0],
+            "loc_final":        loc_series[-1],
+            "sdi_initial":      sdi_series[0],
+            "sdi_final":        sdi_series[-1],
+            "sdi_mean":         sdi_series.mean(),
+            "sdi_std":          sdi_series.std(),
+            "sdi_cv":           cv_sdi,
+            "stdi_mean":        stdi_series.mean(),
+            "stdi_std":         stdi_series.std(),
+            "mk_trend_sdi":     mk_trend_sdi,
+            "mk_p_sdi":         mk_p_sdi,
+            "mk_trend_stdi":    mk_trend_stdi,
+            "mk_p_stdi":        mk_p_stdi,
+            "spearman_rho":     corr,
+            "spearman_p":       corr_p,
+            "abs_spearman_rho": abs(corr),
         })
 
-    if not results:
-        print("No valid repositories found for analysis.")
-        return
+    logger.info(
+        f"Repos analysed: {len(per_repo_results)} | "
+        f"Skipped (too few snapshots): {skipped_too_few} | "
+        f"Skipped (zero SDI): {skipped_zero_sdi}"
+    )
 
-    # 5. Save Detailed Results
-    res_df = pd.DataFrame(results)
-    res_df.to_csv(os.path.join(OUTPUT_DIR, 'rq3_detailed_results.csv'), index=False)
-    
-    # 6. AUTOMATED SELECTION STRATEGY
-    print("\n--- Selecting Case Studies (Stratified Sampling) ---")
-    selected_repos = {}
-    target_patterns = ['Virtuous Refactoring', 'Latent Risk', 'Chaotic Entropy', 'Industrial Stability']
-    
-    for p in target_patterns:
-        candidates = res_df[res_df['pattern'] == p]
-        if p == 'Industrial Stability':
-            best = candidates.sort_values(by=['snapshots'], ascending=False).head(2)
-        else:
-            best = candidates.sort_values(by=['abs_corr', 'snapshots'], ascending=False).head(2)
-            
-        repo_list = best['repo'].tolist()
-        selected_repos[p] = repo_list
-        print(f"Selected for {p}: {repo_list}")
+    if not per_repo_results:
+        logger.error("No valid repositories found for RQ3 analysis.")
+        sys.exit(1)
 
-    with open(os.path.join(OUTPUT_DIR, 'selected_cases.json'), 'w') as f:
-        json.dump(selected_repos, f, indent=4)
+    results_df = pd.DataFrame(per_repo_results)
 
-    # 7. GENERAZIONE RIASSUNTO NUMERICO (Aggiunto)
-    print("\n--- Generating Numerical Summary ---")
-    summary_path = os.path.join(OUTPUT_DIR, 'rq3_numerical_summary.txt')
-    with open(summary_path, 'w') as f:
-        f.write("=== RQ3 EVOLUTIONARY ANALYSIS SUMMARY ===\n\n")
-        f.write(f"Repository analizzati (con >15 snapshot e debito > 0): {len(res_df)}\n\n")
-        
-        f.write("1. DISTRIBUZIONE DEI TREND (Mann-Kendall):\n")
-        # Calcolo percentuali trend
-        trend_counts = res_df['trend'].value_counts(normalize=True) * 100
-        f.write(trend_counts.to_string() + "\n\n")
-        
-        f.write("2. CORRELAZIONE STRUTTURA-SICUREZZA (Media Spearman):\n")
-        f.write(f"Rho medio: {res_df['spearman_corr'].mean():.3f}\n\n")
-        
-        f.write("3. CLASSIFICAZIONE DEGLI ARCHETIPI EVOLUTIVI:\n")
-        pattern_counts = res_df['pattern'].value_counts()
-        f.write(pattern_counts.to_string() + "\n")
-    
-    print(f"Summary saved to: {summary_path}")
-    print(f"Selection complete. List saved to: {os.path.join(OUTPUT_DIR, 'selected_cases.json')}")
+    # 4. Save per-repo results
+    per_repo_path = os.path.join(OUTPUT_DIR, "rq3_per_repo_results.csv")
+    results_df.to_csv(per_repo_path, index=False)
+    logger.info(f"Per-repo results saved to: {per_repo_path}")
+
+    # 5. Contingency table SDI trend x StDI trend
+    contingency = _build_contingency_table(results_df)
+    contingency_path = os.path.join(OUTPUT_DIR, "rq3_trend_contingency.csv")
+    contingency.to_csv(contingency_path)
+    logger.info(f"Contingency table saved to: {contingency_path}")
+    logger.info("Joint trend contingency table (SDI rows x StDI cols):\n"
+                + contingency.to_string())
+
+    # 6. Case study selection
+    logger.info("Selecting case studies...")
+    selected_cases = _select_case_studies(results_df, contingency)
+    cases_path = os.path.join(OUTPUT_DIR, "selected_case_studies.json")
+    with open(cases_path, "w") as fh:
+        json.dump(selected_cases, fh, indent=4)
+    logger.info(f"Case studies saved to: {cases_path}")
+
+    # 7. Numerical summary for paper
+    n_repos      = len(results_df)
+    summary_path = os.path.join(OUTPUT_DIR, "rq3_numerical_summary.txt")
+
+    with open(summary_path, "w") as fh:
+        fh.write("=" * 60 + "\n")
+        fh.write("RQ3 — EVOLUTIONARY ANALYSIS — NUMERICAL SUMMARY\n")
+        fh.write("=" * 60 + "\n\n")
+
+        fh.write(f"Repositories analysed : {n_repos}\n")
+        fh.write(f"  Skipped (< {config.MIN_SNAPSHOTS_FOR_STATS} snapshots) : "
+                 f"{skipped_too_few}\n")
+        fh.write(f"  Skipped (zero SDI throughout) : {skipped_zero_sdi}\n\n")
+
+        fh.write("--- Mann-Kendall SDI trend distribution ---\n")
+        for trend in TREND_LABELS:
+            count = (results_df["mk_trend_sdi"] == trend).sum()
+            fh.write(f"  {trend}: {count} ({count/n_repos*100:.1f}%)\n")
+        fh.write("\n")
+
+        fh.write("--- Mann-Kendall StDI trend distribution ---\n")
+        for trend in TREND_LABELS:
+            count = (results_df["mk_trend_stdi"] == trend).sum()
+            fh.write(f"  {trend}: {count} ({count/n_repos*100:.1f}%)\n")
+        fh.write("\n")
+
+        fh.write("--- Joint trend contingency table "
+                 "(SDI rows x StDI cols, counts) ---\n")
+        fh.write(contingency.to_string())
+        fh.write("\n\n")
+
+        concordant_inc     = int(contingency.loc["increasing",  "increasing"])
+        concordant_dec     = int(contingency.loc["decreasing",  "decreasing"])
+        concordant         = concordant_inc + concordant_dec
+        discordant_id      = int(contingency.loc["increasing",  "decreasing"])
+        discordant_di      = int(contingency.loc["decreasing",  "increasing"])
+        discordant         = discordant_id + discordant_di
+
+        fh.write(f"Concordant joint trends "
+                 f"(both increasing or both decreasing): "
+                 f"{concordant} ({concordant/n_repos*100:.1f}%)\n")
+        fh.write(f"  Both increasing : {concordant_inc} "
+                 f"({concordant_inc/n_repos*100:.1f}%)\n")
+        fh.write(f"  Both decreasing : {concordant_dec} "
+                 f"({concordant_dec/n_repos*100:.1f}%)\n")
+        fh.write(f"Discordant joint trends : "
+                 f"{discordant} ({discordant/n_repos*100:.1f}%)\n\n")
+
+        fh.write("--- Longitudinal Spearman StDI-SDI correlation ---\n")
+        fh.write(f"  Mean rho   : {results_df['spearman_rho'].mean():.3f}\n")
+        fh.write(f"  Median rho : {results_df['spearman_rho'].median():.3f}\n")
+        fh.write(f"  Std rho    : {results_df['spearman_rho'].std():.3f}\n")
+        sig = (results_df["spearman_p"] < 0.05).sum()
+        fh.write(f"  Significant (p < 0.05): {sig} "
+                 f"({sig/n_repos*100:.1f}%)\n\n")
+
+        fh.write("--- SDI variability ---\n")
+        fh.write(f"  Mean CV(SDI): {results_df['sdi_cv'].mean():.3f}\n")
+        fh.write(f"  Repos with CV(SDI) > 0.5: "
+                 f"{(results_df['sdi_cv'] > 0.5).sum()} "
+                 f"({(results_df['sdi_cv'] > 0.5).mean()*100:.1f}%)\n")
+
+    logger.info(f"Numerical summary saved to: {summary_path}")
+    logger.info("RQ3 analysis complete.")
+
 
 if __name__ == "__main__":
     analyze_rq3_statistics()

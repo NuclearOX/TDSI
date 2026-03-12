@@ -28,21 +28,21 @@ MIN_STARS = 10
 
 # --- EVOLUTIONARY ANALYSIS CONFIGURATION (RQ3) ---
 # Maximum number of snapshots to analyze per repository.
-# 100 snapshots provide a deep longitudinal view across a project's history.
-MAX_SNAPSHOTS = 100      
+# 50 snapshots provide a deep longitudinal view across a project's history.
+MAX_SNAPSHOTS = 50      
 
 # Minimum data points required for a statistically significant trend test.
 MIN_SNAPSHOTS_FOR_STATS = 5
 
 # --- TIMEOUT SETTINGS (CRITICAL FOR ROBUSTNESS) ---
 # Global timeout for the analysis of a single repository (in seconds).
-# 5400s (90 minutes) is an aggressive but safe upper bound to prevent stalls.
-REPO_ANALYSIS_TIMEOUT = 5400 
+# 7200s (2 hours) is an aggressive but safe upper bound to prevent stalls.
+REPO_ANALYSIS_TIMEOUT = 7200 
 
-# Internal timeout for the Trivy CLI scanner per snapshot.
-# Set to 50 minutes to handle very large modules without being killed prematurely
-# by the global timeout. The Python timeout MUST be greater than this value.
-TRIVY_CLI_TIMEOUT = "60m"
+# Set to 10 minutes to skip very large snapshots quickly and avoid
+# blocking the mining run. The Python timeout in security_model.py
+# must be greater than this value.
+TRIVY_CLI_TIMEOUT = "10m"
 
 # --- SECURITY DEBT WEIGHTS ---
 # Based on CVSS v3.1 severity classes and academic literature (e.g., Rahman et al. 2019).

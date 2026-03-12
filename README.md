@@ -1,28 +1,38 @@
-# TerraPulse
 
-**TerraPulse** is an automated research framework designed to analyze the co-evolution of **Structural Quality Debt** and **Security Debt** in Terraform-based Infrastructure as Code (IaC).
+# TerraPulse: Bridging the Gap Between Code Quality and Security in IaC Ecosystems
 
-This project serves as the replication package for the empirical study conducted for the "Software Evolution and Quality" course at the University of Sannio (Benevento, Italy).
+**TerraPulse** is a robust, automated research framework designed to conduct large-scale, longitudinal empirical studies on the co-evolution of **Structural Quality** and **Security Debt** in Terraform-based Infrastructure as Code (IaC).
+
+This repository serves as the complete replication package for the empirical study conducted for the "Software Evolution and Quality" [39939] course at the University of Sannio (Benevento, Italy).
 
 ---
 
 ## Research Overview
 
-The goal of this study is to determine if the structural way code is written (Complexity, Coupling, and Code Smells) serves as a leading indicator for security vulnerabilities. We answer four key Research Questions:
+While the impact of code quality on maintainability is well-studied, its longitudinal relationship with security vulnerabilities in IaC remains largely unexplored. This project investigates whether the structural way code is written (complexity, coupling, resource density) serves as a **leading indicator** for security vulnerabilities over time.
 
-- **RQ1 - Association:** Is there a statistically significant correlation between Structural Quality Debt and Security Debt?
-- **RQ2 - Prediction:** Which structural attributes (e.g., Hard-coded values, Complexity) serve as the best predictors for Security Debt?
-- **RQ3 - Evolution:** How do Quality and Security Debt change reciprocally as a Terraform module matures over time?
-- **RQ4 - Characterization:** Can we identify distinct project archetypes (e.g., *Critical Risk* vs. *Managed Monoliths*) based on their technical debt profiles?
+We answer four fundamental Research Questions (RQs):
 
-## Key Features
+- **RQ1 (Association):** Is there a statistically significant correlation between structural code metrics and the Security Debt Index (SDI)?
+- **RQ2 (Prediction):** Which structural attributes are the most reliable predictors for the emergence of security vulnerabilities?
+- **RQ3 (Evolution):** How do structural and security debt co-evolve over the lifecycle of an IaC project, and what joint trend patterns can be identified across the population?
+- **RQ4 (Characterization):** Is it possible to identify distinct clusters of Terraform projects with homogeneous structural and security debt intensity profiles?
 
-- **Adaptive History Mining:** Uses `PyDriller` and a custom "Smart Sampling" strategy to extract snapshots from either official Git Tags (Releases) or significant commits across the entire project history.
-- **Forced State Analysis:** Implements a robust `git checkout -f` logic to ensure every analysis is performed on the exact historical state of the files.
-- **Multi-vocal Quality Model:** Integrates metrics from **Dalla Palma et al. (2020)** and **Konala et al. (2025)**, mapping Terraform attributes to the ISO/IEC 25010 standard.
-- **Deep Security Scanning:** Wraps **AquaSecurity Trivy** to categorize debt into Infrastructure Misconfigurations, Dependency Vulnerabilities (CVEs), and Hard-coded Secrets.
-- **Unsupervised Learning:** Implements K-Means clustering to identify project archetypes based on debt density and scale.
-- **Resilient Execution:** Features a multiprocessing-based hard-timeout (90 mins per repo) and incremental resume logic to survive system crashes.
+### Key Findings
+* **The Complexity Paradox:** Higher cyclomatic complexity in IaC acts as a protective factor, proving that abstraction (e.g., dynamic blocks, loops) prevents misconfigurations compared to flat, repetitive "copy-paste" code.
+* **Predictive Power:** Using a rigorous `GroupKFold` cross-validation to prevent data leakage, structural metrics alone can explain **39% of the variance** in security debt across unseen repositories. 
+* **The Inevitability of Decay:** 74.4% of the analyzed mature projects exhibit continuously increasing structural debt. Joint remediation (improving both structure and security) occurs in only 0.6% of cases.
+* **Three Ecosystem Archetypes:** Risk is not uniform. The ecosystem divides into *Low-to-Moderate-Debt* (highly abstracted modules), *High-Debt* (the norm, driven by infra misconfigurations), and *Very-High-Debt* (systemic liabilities driven by vulnerable external dependencies).
+
+---
+
+## Key Methodological Features
+
+- **Adaptive History Mining:** Uses `PyDriller` to extract up to 50 equidistant commits, employing a robust `git clean -fdx` logic for state consistency.
+- **Three-Stage Statistical Validation:** Includes Theoretical, Empirical (post-dropout), and Post-Trivy filtering validations verified via Kolmogorov-Smirnov tests to ensure **0% selection bias and 0% systematic false negatives**.
+- **Content-Hashing Deduplication:** Hashes raw `.tf` contents to skip redundant commits and completely prevent temporal autocorrelation.
+- **Hybrid Quality & Security Parsing:** Merges ISO/IEC 25010 structural metrics extracted via `python-hcl2` (with regex fallback) with offline vulnerability scanning via **AquaSecurity Trivy**.
+- **Advanced Statistical Modeling:** Features Benjamini-Hochberg FDR corrections, Robust Linear Models (RLM) with Huber's T norm to handle outliers, and 95th-percentile feature winsorization for K-Means clustering.
 
 ---
 
@@ -32,26 +42,28 @@ The goal of this study is to determine if the structural way code is written (Co
 TerraPulse/
 ├── data/
 │   ├── input/              # Source database (TerraDS.sqlite)
-│   └── output/             # CSV datasets and generated figures
+│   └── output/             # CSV datasets, logs, and generated figures
 ├── src/
 │   ├── main.py             # Orchestrates the mining and analysis
 │   ├── config.py           # Global settings, weights, and thresholds
-│   ├── mining/             # Repository mining and sampling logic
+│   ├── inspect_db.py       # TerraDS database inspection utility
+│   ├── mining/             # Repository mining and adaptive sampling logic
 │   ├── metrics/            # Quality (HCL2) and Security (Trivy) models
 │   └── analysis/           # Statistical analysis modules
+│       ├── validate_sample.py      # 3-Stage K-S Test Validation
 │       ├── rq1_correlation.py      # Spearman Correlation & Heatmap
-│       ├── rq1_advanced_stats.py   # OLS/RLM Regression & VIF
+│       ├── rq1_advanced_stats.py   # OLS vs RLM Regression & VIF
 │       ├── rq2_prediction.py       # Random Forest & Feature Importance
-│       ├── rq3_statistics.py       # Evolutionary Trends & StDI Calc
-│       ├── rq3_visualizer.py       # Covariance & Stacked Plots
-│       └── rq4_clustering.py       # K-Means Archetype Discovery
+│       ├── rq3_statistics.py       # Mann-Kendall Trends & StDI Calc
+│       ├── rq3_visualizer.py       # Covariance & Stacked Evolution Plots
+│       └── rq4_clustering.py       # K-Means Archetype Discovery (Silhouette)
 ├── Dockerfile              # Reproducible containerized environment
 └── requirements.txt        # Python dependencies
 ```
 
 ---
 
-## Usage Guide
+## Usage Guide & Replication
 
 ### 0. Primary Setup
 1. Create the `data/` folder in the project root.
@@ -59,58 +71,64 @@ TerraPulse/
 3. Download the **TerraDS.sqlite** file from [Zenodo](https://zenodo.org/records/14217386) and place it inside `data/input/`.
 
 ### 1. Build the Environment
-Ensure Docker is installed, then build the research image:
+Ensure Docker is installed. This builds the isolated research image, installing Python dependencies and pre-fetching Trivy vulnerability databases:
 ```bash
 docker build -t terrapulse .
 ```
 
 ### 2. Data Collection (Mining)
-Run the main mining pipeline. This will clone repositories, travel through history, and generate the dataset:
+Run the main mining pipeline to clone repositories, extract history, and generate the raw dataset:
 ```bash
-docker run --rm -v ${PWD}:/app terrapulse
+docker run --rm -v ${PWD}/data:/app/data terrapulse
 ```
-*The tool will automatically skip already processed repositories found in `dataset_final.csv`.*
+*Note: The tool features a 90-minute hard-timeout per repository and a resume logic. It will automatically skip already-processed repositories found in `dataset_final.csv`.*
 
-### 3. Statistical Analysis & Replication
-Once mining is complete, run the following commands to generate the results and figures described in the paper:
+### 3. Statistical Analysis & Results Generation
+Run the following commands sequentially to replicate the statistical tests, train the models, and generate the figures described in the paper. Results are saved in `data/output/figures/`.
 
-**RQ1: Association & Regression**
+**Step 3.0: Sample Validation (Crucial before RQs)**
 ```bash
-docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq1_correlation.py
-docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq1_advanced_stats.py
-```
-
-**RQ2: Prediction & Feature Importance**
-```bash
-docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq2_prediction.py
+docker run --rm --entrypoint "" -v ${PWD}/data:/app/data terrapulse python src/analysis/validate_sample.py
 ```
 
-**RQ3: Evolutionary Analysis**
+**Step 3.1: RQ1 - Association & Regression**
 ```bash
-docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq3_statistics.py
-docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq3_visualizer.py
+docker run --rm --entrypoint "" -v ${PWD}/data:/app/data terrapulse python src/analysis/rq1_correlation.py
+docker run --rm --entrypoint "" -v ${PWD}/data:/app/data terrapulse python src/analysis/rq1_advanced_stats.py
 ```
 
-**RQ4: Archetype Clustering**
+**Step 3.2: RQ2 - Prediction & Feature Importance**
 ```bash
-docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq4_clustering.py
+docker run --rm --entrypoint "" -v ${PWD}/data:/app/data terrapulse python src/analysis/rq2_prediction.py
+```
+
+**Step 3.3: RQ3 - Evolutionary Analysis**
+*(Requires the Feature Importance CSV generated in RQ2 to calculate the Structural Debt Index)*
+```bash
+docker run --rm --entrypoint "" -v ${PWD}/data:/app/data terrapulse python src/analysis/rq3_statistics.py
+docker run --rm --entrypoint "" -v ${PWD}/data:/app/data terrapulse python src/analysis/rq3_visualizer.py
+```
+
+**Step 3.4: RQ4 - Archetype Clustering**
+```bash
+docker run --rm --entrypoint "" -v ${PWD}/data:/app/data terrapulse python src/analysis/rq4_clustering.py
 ```
 
 ---
 
-## Methodology & Main References
+## Main References
 
-The metrics and methodologies used in this tool are mainly grounded in the following academic works:
+The metrics and methodologies implemented in TerraPulse are grounded in the following academic works:
 
-1.  **Konala et al. (2025)** - *A Framework for Measuring the Quality of Infrastructure-as-Code Scripts.* (Quality Mapping Framework).
-2.  **Dalla Palma et al. (2020)** - *Toward a catalogue of software quality metrics for infrastructure code.* (Structural Metrics).
-3.  **Rahman et al. (2019)** - *The Seven Sins: Security Smells in Infrastructure as Code Scripts.* (Security Debt Weights).
-4.  **Spadini et al. (2018)** - *PyDriller: Python framework for mining software repositories.* (Mining Engine).
+1. **Lehman (1980)** - *Programs, life cycles, and laws of software evolution.* (Theoretical foundation for RQ3).
+2. **Dalla Palma et al. (2020)** - *Toward a catalog of software quality metrics for infrastructure code.* (Structural Metrics mapping).
+3. **Rahman et al. (2019)** - *The Seven Sins: Security Smells in Infrastructure as Code Scripts.* (Security Debt concepts).
+4. **Bühler et al. (2024)** - *TerraDS: A Dataset for Terraform HCL Programs.* (Source Population).
 
 ---
 
 ## Academic Context
-- **Course:** Software Evolution and Quality [39939]
-- **Institution:** University of Sannio, Benevento
+- **Course:** Evoluzione e Qualità del Software [39939]
+- **Institution:** Università degli Studi del Sannio, Benevento (Italy)
 - **Professor:** Damian Andrew Tamburri
 - **Authors:** Francis Mascia, Alfonso Maria Turco
