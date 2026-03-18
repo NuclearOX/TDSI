@@ -94,7 +94,7 @@ RAW_METRICS = [
 TARGET = 'security_debt_score'
 
 # Random Forest hyperparameters
-RF_N_ESTIMATORS = 200
+RF_N_ESTIMATORS = 2000
 RF_RANDOM_STATE = 42
 CV_N_SPLITS     = 5
 TEST_SIZE       = 0.20
@@ -351,7 +351,7 @@ def run_final_evaluation(
 
     # Visualisations
     _plot_feature_importance(importances)
-    _plot_predicted_vs_actual(y_test_orig, y_pred_orig, cv_scores.mean())
+    _plot_predicted_vs_actual(y_test_orig, y_pred_orig, r2_test, cv_scores.mean())
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +389,7 @@ def _plot_feature_importance(importances: pd.DataFrame) -> None:
 def _plot_predicted_vs_actual(
     y_true: pd.Series,
     y_pred: np.ndarray,
+    r2_held_out: float,
     mean_r2_cv: float,
 ) -> None:
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -403,7 +404,7 @@ def _plot_predicted_vs_actual(
     ax.set_ylabel('Predicted Security Debt Score', fontsize=11)
     ax.set_title(
         f'RQ2 — Prediction Accuracy (original SDI scale)\n'
-        f'CV Mean R² = {mean_r2_cv:.3f}  |  GroupShuffleSplit 80/20',
+        f'Held-out R² = {r2_held_out:.3f}  |  CV Mean R² = {mean_r2_cv:.3f}  |  GroupShuffleSplit 80/20',
         fontsize=12,
     )
     ax.legend()
