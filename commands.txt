@@ -8,35 +8,47 @@ docker build -t terrapulse .
 
 # 2. MAIN EXECUTION (Mining & Data Collection)
 # Launch the main mining process. It supports incremental resume.
-# Mounts the current directory to /app to store CSV results and logs locally.
-# SBAGLIATO! docker run --rm -v ${PWD}:/app terrapulse
-docker run --rm -v ${PWD}/data:/app/data terrapulse # GIUSTO!
+# Mounts the local 'data' directory to persist CSV results and logs.
+docker run --rm -v ${PWD}/data:/app/data terrapulse
 
 # 3. DATABASE INSPECTION
 # Verify tables and columns within the TerraDS SQLite database.
-docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/inspect_db.py
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/inspect_db.py
 
 # 4. MODULE TESTING (Dry Runs)
 # Test the repository loader (Target selection logic)
-docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/mining/terrads_loader.py
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/mining/terrads_loader.py
 
 # Test the Quality Metric Extractor (HCL2 parser)
-docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/metrics/quality_model.py
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/metrics/quality_model.py
 
 # Test the Security Debt Extractor (Trivy wrapper)
-docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/metrics/security_model.py
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/metrics/security_model.py
 
 # 5. STATISTICAL ANALYSIS (Post-Mining)
-# Run these commands after the dataset_final_FIXED.csv is generated.
+# Run these commands sequentially AFTER 'dataset_final.csv' is generated.
 
-# RQ1 - Correlation Analysis
-docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/analysis/rq1_correlation.py
+# 5.0 - Sample Validation (Generates K-S plots and the Trivy filter list)
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/validate_sample.py
 
-# RQ2 - Prediction Analysis (Random Forest)
-docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/analysis/rq2_prediction.py
+# 5.1 - RQ1: Correlation Analysis (Spearman + FDR)
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq1_correlation.py
 
-# RQ3 - Evolutionary Analysis (Mann-Kendall)
-docker run --rm --entrypoint "" -v ${PWD}:/app terra-miner python src/analysis/rq3_evolution.py
+# 5.2 - RQ1: Multivariate Regression (OLS, RLM, VIF)
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq1_advanced_stats.py
+
+# 5.3 - RQ2: Prediction Analysis (Random Forest & Feature Importance)
+# NOTE: Must run before RQ3 to generate 'rq2_feature_importance.csv' used for StDI.
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq2_prediction.py
+
+# 5.4 - RQ3: Evolutionary Analysis (Mann-Kendall Trends)
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq3_statistics.py
+
+# 5.5 - RQ3: Case Studies Visualization (Covariance plots)
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq3_visualizer.py
+
+# 5.6 - RQ4: Archetype Clustering (K-Means & Radar Chart)
+docker run --rm --entrypoint "" -v ${PWD}:/app terrapulse python src/analysis/rq4_clustering.py
 
 # 6. SYSTEM CLEANUP
 # Remove unused Docker layers and caches to free up space.
