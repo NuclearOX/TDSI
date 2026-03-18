@@ -26,7 +26,7 @@ __pycache__/
 .cursor/
 
 # --- Documentation & Papers ---
-*.pdf
+#*.pdf
 *.docx
 
 # --- Infrastructure as Code (Terraform/Trivy temp files) ---
